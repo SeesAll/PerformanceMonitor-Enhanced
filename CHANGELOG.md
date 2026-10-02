@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.3.0
+
+- Added an independent one-second benchmark sampling interval.
+- Added configurable minimum sample requirements; short smoke tests are now explicitly low-confidence.
+- Added optional named-baseline selection to `monitor.benchmark`.
+- Added persistent named benchmark references with bounded retention.
+- Added High, Moderate, and Low comparison-confidence classifications.
+- Added baseline and current values to Discord comparison results.
+- Replaced negative “improvement” wording with clear improved/regressed language.
+- Added a configurable plugin-hook noise floor to suppress misleading percentages from tiny samples.
+- Added observation-duration comparability checks and clearer separation of current-run quality from cross-run confidence.
+
 ## 2.2.0
 
 - Renamed the plugin to Server Performance Analyzer.

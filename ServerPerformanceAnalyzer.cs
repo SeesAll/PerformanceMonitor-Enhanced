@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.2.0")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.3.0")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -82,7 +82,7 @@ namespace Oxide.Plugins
             {
                 _reportTimer = timer.Every(_config.ReportIntervalSeconds, delegate
                 {
-                    TryStartReport("scheduled", 0, 0, false, null);
+                    TryStartReport("scheduled", 0, 0, null, false, null);
                 });
             }
         }
@@ -144,7 +144,7 @@ namespace Oxide.Plugins
             }
 
             string label = GetArgument(arg, 0, "manual");
-            if (TryStartReport(label, 0, 0, false, arg))
+            if (TryStartReport(label, 0, 0, null, false, arg))
             {
                 Reply(arg, "Performance report started.");
             }
@@ -161,7 +161,7 @@ namespace Oxide.Plugins
             string label = GetArgument(arg, 0, null);
             if (string.IsNullOrWhiteSpace(label))
             {
-                Reply(arg, "Usage: monitor.benchmark <label> [duration seconds] [warm-up seconds]");
+                Reply(arg, "Usage: monitor.benchmark <label> [duration seconds] [warm-up seconds] [baseline label]");
                 return;
             }
 
@@ -169,12 +169,15 @@ namespace Oxide.Plugins
             duration = Math.Max(_config.MinimumBenchmarkDurationSeconds, Math.Min(_config.MaximumBenchmarkDurationSeconds, duration));
             int warmup = GetIntArgument(arg, 2, _config.DefaultBenchmarkWarmupSeconds);
             warmup = Math.Max(0, Math.Min(_config.MaximumBenchmarkWarmupSeconds, warmup));
+            string baselineLabel = GetArgument(arg, 3, null);
+            baselineLabel = string.IsNullOrWhiteSpace(baselineLabel) ? null : NormalizeLabel(baselineLabel);
 
-            if (TryStartReport(label, duration, warmup, true, arg))
+            if (TryStartReport(label, duration, warmup, baselineLabel, true, arg))
             {
                 Reply(arg, string.Format(CultureInfo.InvariantCulture,
-                    "Benchmark '{0}' started with a {1}s warm-up and {2}s observation window.",
-                    NormalizeLabel(label), warmup, duration));
+                    "Benchmark '{0}' started with a {1}s warm-up and {2}s observation window{3}.",
+                    NormalizeLabel(label), warmup, duration,
+                    baselineLabel == null ? string.Empty : " against baseline '" + baselineLabel + "'"));
             }
         }
 
@@ -234,7 +237,7 @@ namespace Oxide.Plugins
 
         #region Report orchestration
 
-        private bool TryStartReport(string requestedLabel, int benchmarkDurationSeconds, int warmupSeconds, bool benchmark, ConsoleSystem.Arg requester)
+        private bool TryStartReport(string requestedLabel, int benchmarkDurationSeconds, int warmupSeconds, string baselineLabel, bool benchmark, ConsoleSystem.Arg requester)
         {
             if (_reportRunning)
             {
@@ -247,17 +250,17 @@ namespace Oxide.Plugins
             _activeLabel = NormalizeLabel(requestedLabel);
             _activeStartedUtc = DateTime.UtcNow;
             _activeCoroutine = ServerMgr.Instance.StartCoroutine(
-                CreateReport(_activeLabel, benchmarkDurationSeconds, warmupSeconds, benchmark));
+                CreateReport(_activeLabel, benchmarkDurationSeconds, warmupSeconds, baselineLabel, benchmark));
             return true;
         }
 
-        private IEnumerator CreateReport(string label, int benchmarkDurationSeconds, int warmupSeconds, bool benchmark)
+        private IEnumerator CreateReport(string label, int benchmarkDurationSeconds, int warmupSeconds, string baselineLabel, bool benchmark)
         {
             Stopwatch totalStopwatch = Stopwatch.StartNew();
             DateTime startedUtc = DateTime.UtcNow;
             PerformanceReport report = new PerformanceReport
             {
-                SchemaVersion = 2,
+                SchemaVersion = 3,
                 ReportId = Guid.NewGuid().ToString("N"),
                 Label = label,
                 Mode = benchmark ? "benchmark" : "snapshot",
@@ -294,7 +297,7 @@ namespace Oxide.Plugins
                         {
                             completedPerformanceWindow.Capture(Performance.current);
                             float remaining = (float)(benchmarkDurationSeconds - benchmarkStopwatch.Elapsed.TotalSeconds);
-                            float delay = Mathf.Min(_config.PerformanceSampleIntervalSeconds, Mathf.Max(0.05f, remaining));
+                            float delay = Mathf.Min(_config.BenchmarkSampleIntervalSeconds, Mathf.Max(0.05f, remaining));
                             yield return new WaitForSecondsRealtime(delay);
                         }
 
@@ -394,9 +397,10 @@ namespace Oxide.Plugins
                 report.TotalReportDurationSeconds = totalStopwatch.Elapsed.TotalSeconds;
                 report.Quality = BuildQualityReport(report);
 
-                if (benchmark && failure == null && _config.CompareBenchmarkToPrevious)
+                if (benchmark && failure == null)
                 {
-                    report.PreviousBenchmarkComparison = BuildAndStoreBenchmarkComparison(report);
+                    bool createComparison = _config.CompareBenchmarkToPrevious || baselineLabel != null;
+                    report.PreviousBenchmarkComparison = BuildAndStoreBenchmarkComparison(report, baselineLabel, createComparison);
                 }
 
                 if (failure != null)
@@ -723,9 +727,15 @@ namespace Oxide.Plugins
                     report.OnlinePlayers, report.CompletedOnlinePlayers));
             }
 
-            if (report.PerformanceWindow == null || report.PerformanceWindow.SampleCount < 3)
+            int minimumSamples = report.Mode == "benchmark"
+                ? _config.MinimumBenchmarkSamplesForComparison
+                : 3;
+            if (report.PerformanceWindow == null || report.PerformanceWindow.SampleCount < minimumSamples)
             {
-                quality.Warnings.Add("Fewer than three performance samples were captured.");
+                quality.Warnings.Add(string.Format(CultureInfo.InvariantCulture,
+                    "Only {0} performance samples were captured; at least {1} are required for a meaningful comparison.",
+                    report.PerformanceWindow == null ? 0 : report.PerformanceWindow.SampleCount,
+                    minimumSamples));
             }
 
             DateTime windowStart = report.ObservationStartedUtc == default(DateTime)
@@ -755,10 +765,17 @@ namespace Oxide.Plugins
             return quality;
         }
 
-        private BenchmarkComparison BuildAndStoreBenchmarkComparison(PerformanceReport currentReport)
+        private BenchmarkComparison BuildAndStoreBenchmarkComparison(
+            PerformanceReport currentReport,
+            string requestedBaselineLabel,
+            bool createComparison)
         {
             BenchmarkReference current = BenchmarkReference.FromReport(currentReport);
             BenchmarkReference previous = null;
+            BenchmarkReferenceStore store = new BenchmarkReferenceStore
+            {
+                Entries = new List<BenchmarkReference>()
+            };
 
             try
             {
@@ -766,55 +783,162 @@ namespace Oxide.Plugins
                 {
                     previous = Interface.Oxide.DataFileSystem.ReadObject<BenchmarkReference>(DataRoot + "/PreviousBenchmark");
                 }
+
+                if (Interface.Oxide.DataFileSystem.ExistsDatafile(DataRoot + "/BenchmarkReferences"))
+                {
+                    store = Interface.Oxide.DataFileSystem.ReadObject<BenchmarkReferenceStore>(DataRoot + "/BenchmarkReferences")
+                            ?? store;
+                    store.Entries = store.Entries ?? new List<BenchmarkReference>();
+                }
             }
             catch (Exception ex)
             {
-                PrintWarning("Unable to read the previous benchmark reference: " + ex.Message);
+                PrintWarning("Unable to read benchmark references: " + ex.Message);
             }
 
-            Interface.Oxide.DataFileSystem.WriteObject(DataRoot + "/PreviousBenchmark", current);
+            if (previous != null && !string.IsNullOrEmpty(previous.ReportId)
+                && FindBenchmarkReference(store.Entries, previous.Label) == null)
+            {
+                StoreBenchmarkReference(store.Entries, previous);
+            }
 
-            if (previous == null || string.IsNullOrEmpty(previous.ReportId))
+            BenchmarkReference baseline = requestedBaselineLabel == null
+                ? previous
+                : FindBenchmarkReference(store.Entries, requestedBaselineLabel);
+
+            Interface.Oxide.DataFileSystem.WriteObject(DataRoot + "/PreviousBenchmark", current);
+            StoreBenchmarkReference(store.Entries, current);
+            while (store.Entries.Count > _config.MaximumNamedBenchmarkReferences)
+            {
+                store.Entries.RemoveAt(store.Entries.Count - 1);
+            }
+            Interface.Oxide.DataFileSystem.WriteObject(DataRoot + "/BenchmarkReferences", store);
+
+            if (!createComparison)
             {
                 return null;
             }
 
             BenchmarkComparison comparison = new BenchmarkComparison
             {
-                BaselineReportId = previous.ReportId,
-                BaselineLabel = previous.Label,
-                BaselineCompletedUtc = previous.CompletedUtc,
+                BaselineReportId = baseline == null ? null : baseline.ReportId,
+                BaselineLabel = baseline == null ? requestedBaselineLabel : baseline.Label,
+                BaselineCompletedUtc = baseline == null ? default(DateTime) : baseline.CompletedUtc,
                 Metrics = new List<BenchmarkComparisonMetric>(),
-                ContextWarnings = new List<string>()
+                ContextWarnings = new List<string>(),
+                Confidence = "High"
             };
 
-            AddComparisonMetric(comparison, "Average Frame Time", previous.AverageFrameTime, current.AverageFrameTime, true, "ms");
-            AddComparisonMetric(comparison, "Average Frame Rate", previous.AverageFrameRate, current.AverageFrameRate, false, "fps");
-            AddComparisonMetric(comparison, "Plugin Hook Time Rate", previous.PluginHookMillisecondsPerMinute, current.PluginHookMillisecondsPerMinute, true, "ms/min");
-
-            if (previous.OnlinePlayers != current.OnlinePlayers)
+            if (baseline == null || string.IsNullOrEmpty(baseline.ReportId))
             {
-                comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
-                    "Online players differ: baseline {0}, current {1}.", previous.OnlinePlayers, current.OnlinePlayers));
+                comparison.Confidence = "Low";
+                comparison.ContextWarnings.Add(requestedBaselineLabel == null
+                    ? "No preceding benchmark is available yet. This run has been stored as the next baseline."
+                    : "The requested baseline '" + requestedBaselineLabel + "' was not found. Run that labeled benchmark first.");
+                return comparison;
             }
 
-            if (previous.EntityCount > 0 && current.EntityCount > 0)
+            AddComparisonMetric(comparison, "Average Frame Time", baseline.AverageFrameTime, current.AverageFrameTime, true, "ms", true, null);
+            AddComparisonMetric(comparison, "Average Frame Rate", baseline.AverageFrameRate, current.AverageFrameRate, false, "fps", true, null);
+
+            bool pluginSignalReliable = baseline.PluginHookObservedMilliseconds >= _config.MinimumPluginHookMillisecondsForComparison
+                                        && current.PluginHookObservedMilliseconds >= _config.MinimumPluginHookMillisecondsForComparison;
+            string pluginNoiseNote = pluginSignalReliable
+                ? null
+                : string.Format(CultureInfo.InvariantCulture,
+                    "One or both windows measured less than {0:F1} ms of total plugin hook time.",
+                    _config.MinimumPluginHookMillisecondsForComparison);
+            AddComparisonMetric(comparison, "Plugin Hook Time Rate",
+                baseline.PluginHookMillisecondsPerMinute,
+                current.PluginHookMillisecondsPerMinute,
+                true,
+                "ms/min",
+                pluginSignalReliable,
+                pluginNoiseNote);
+
+            if (baseline.OnlinePlayers != current.OnlinePlayers)
             {
-                double entityDifferencePercent = (current.EntityCount - previous.EntityCount) * 100d / previous.EntityCount;
+                comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
+                    "Online players differ: baseline {0}, current {1}.", baseline.OnlinePlayers, current.OnlinePlayers));
+            }
+
+            if (baseline.EntityCount > 0 && current.EntityCount > 0)
+            {
+                double entityDifferencePercent = (current.EntityCount - baseline.EntityCount) * 100d / baseline.EntityCount;
                 if (Math.Abs(entityDifferencePercent) >= 5d)
                 {
                     comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
                         "Entity count differs by {0:+0.0;-0.0;0.0}%: baseline {1}, current {2}.",
-                        entityDifferencePercent, previous.EntityCount, current.EntityCount));
+                        entityDifferencePercent, baseline.EntityCount, current.EntityCount));
                 }
             }
 
-            if (!previous.SuitableForComparison || !current.SuitableForComparison)
+            if (baseline.ObservationDurationSeconds > 0 && current.ObservationDurationSeconds > 0)
+            {
+                double durationDifferencePercent = Math.Abs(current.ObservationDurationSeconds - baseline.ObservationDurationSeconds)
+                                                   * 100d / baseline.ObservationDurationSeconds;
+                if (durationDifferencePercent >= 10d)
+                {
+                    comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
+                        "Observation durations differ by {0:F1}%: baseline {1:F1}s, current {2:F1}s.",
+                        durationDifferencePercent, baseline.ObservationDurationSeconds, current.ObservationDurationSeconds));
+                }
+            }
+
+            if (!baseline.SuitableForComparison || !current.SuitableForComparison)
             {
                 comparison.ContextWarnings.Add("One or both benchmark windows contain quality warnings.");
             }
 
+            if (baseline.SampleCount < _config.MinimumBenchmarkSamplesForComparison
+                || current.SampleCount < _config.MinimumBenchmarkSamplesForComparison)
+            {
+                comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
+                    "Insufficient samples for a robust comparison: baseline {0}, current {1}, required {2}.",
+                    baseline.SampleCount, current.SampleCount, _config.MinimumBenchmarkSamplesForComparison));
+            }
+
+            if (comparison.ContextWarnings.Count > 0)
+            {
+                comparison.Confidence = "Low";
+            }
+            else if (!pluginSignalReliable)
+            {
+                comparison.Confidence = "Moderate";
+            }
+
             return comparison;
+        }
+
+        private static BenchmarkReference FindBenchmarkReference(List<BenchmarkReference> entries, string label)
+        {
+            if (entries == null || string.IsNullOrWhiteSpace(label))
+            {
+                return null;
+            }
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                if (entries[i] != null && string.Equals(entries[i].Label, label, StringComparison.OrdinalIgnoreCase))
+                {
+                    return entries[i];
+                }
+            }
+
+            return null;
+        }
+
+        private static void StoreBenchmarkReference(List<BenchmarkReference> entries, BenchmarkReference current)
+        {
+            for (int i = entries.Count - 1; i >= 0; i--)
+            {
+                if (entries[i] != null && string.Equals(entries[i].Label, current.Label, StringComparison.OrdinalIgnoreCase))
+                {
+                    entries.RemoveAt(i);
+                }
+            }
+
+            entries.Insert(0, current);
         }
 
         private static void AddComparisonMetric(
@@ -823,18 +947,26 @@ namespace Oxide.Plugins
             double? baseline,
             double? current,
             bool lowerIsBetter,
-            string unit)
+            string unit,
+            bool reliable,
+            string note)
         {
-            if (!baseline.HasValue || !current.HasValue || Math.Abs(baseline.Value) < 0.0000001d)
+            if (!baseline.HasValue || !current.HasValue)
             {
                 return;
             }
 
-            double changePercent = (current.Value - baseline.Value) * 100d / Math.Abs(baseline.Value);
-            double improvementPercent = lowerIsBetter ? -changePercent : changePercent;
-            string result = Math.Abs(improvementPercent) < 1d
-                ? "No material change"
-                : improvementPercent > 0 ? "Improved" : "Regressed";
+            double? changePercent = null;
+            double? improvementPercent = null;
+            string result = "Inconclusive";
+            if (reliable && Math.Abs(baseline.Value) >= 0.0000001d)
+            {
+                changePercent = (current.Value - baseline.Value) * 100d / Math.Abs(baseline.Value);
+                improvementPercent = lowerIsBetter ? -changePercent : changePercent;
+                result = Math.Abs(improvementPercent.Value) < 1d
+                    ? "No material change"
+                    : improvementPercent.Value > 0 ? "Improved" : "Regressed";
+            }
 
             comparison.Metrics.Add(new BenchmarkComparisonMetric
             {
@@ -844,7 +976,9 @@ namespace Oxide.Plugins
                 Current = current.Value,
                 ChangePercent = changePercent,
                 ImprovementPercent = improvementPercent,
-                Result = result
+                Result = result,
+                Reliable = reliable,
+                Note = note
             });
         }
 
@@ -1061,16 +1195,43 @@ namespace Oxide.Plugins
             if (report.PreviousBenchmarkComparison != null)
             {
                 System.Text.StringBuilder comparisonText = new System.Text.StringBuilder();
-                comparisonText.Append("Compared with **")
-                    .Append(EscapeDiscordMarkdown(report.PreviousBenchmarkComparison.BaselineLabel))
+                comparisonText.Append("**Confidence: ")
+                    .Append(EscapeDiscordMarkdown(report.PreviousBenchmarkComparison.Confidence))
                     .AppendLine("**");
+
+                if (!string.IsNullOrWhiteSpace(report.PreviousBenchmarkComparison.BaselineReportId))
+                {
+                    comparisonText.Append("Compared with **")
+                        .Append(EscapeDiscordMarkdown(report.PreviousBenchmarkComparison.BaselineLabel))
+                        .AppendLine("**");
+                }
 
                 for (int i = 0; i < report.PreviousBenchmarkComparison.Metrics.Count; i++)
                 {
                     BenchmarkComparisonMetric metric = report.PreviousBenchmarkComparison.Metrics[i];
-                    comparisonText.AppendFormat(CultureInfo.InvariantCulture,
-                        "{0}: **{1}** ({2:+0.0;-0.0;0.0}% improvement)\n",
-                        EscapeDiscordMarkdown(metric.Name), metric.Result, metric.ImprovementPercent);
+                    comparisonText.Append(EscapeDiscordMarkdown(metric.Name))
+                        .Append(": **")
+                        .Append(EscapeDiscordMarkdown(metric.Result))
+                        .Append("**");
+
+                    if (metric.ImprovementPercent.HasValue)
+                    {
+                        comparisonText.AppendFormat(CultureInfo.InvariantCulture,
+                            " by {0:F1}%", Math.Abs(metric.ImprovementPercent.Value));
+                    }
+
+                    comparisonText.Append(" (`")
+                        .Append(FormatComparisonValue(metric.Baseline, metric.Unit))
+                        .Append(" → ")
+                        .Append(FormatComparisonValue(metric.Current, metric.Unit))
+                        .AppendLine("`)");
+
+                    if (!string.IsNullOrWhiteSpace(metric.Note))
+                    {
+                        comparisonText.Append("↳ ")
+                            .Append(EscapeDiscordMarkdown(metric.Note))
+                            .Append('\n');
+                    }
                 }
 
                 for (int i = 0; i < report.PreviousBenchmarkComparison.ContextWarnings.Count; i++)
@@ -1080,15 +1241,15 @@ namespace Oxide.Plugins
                         .Append('\n');
                 }
 
-                fields.Add(new DiscordField("Previous benchmark comparison", Truncate(comparisonText.ToString(), 1024), false));
+                fields.Add(new DiscordField("Benchmark comparison", Truncate(comparisonText.ToString(), 1024), false));
             }
 
             if (report.Quality != null)
             {
                 string qualityText = report.Quality.SuitableForComparison
-                    ? "✅ No known contamination markers were detected."
+                    ? "✅ Current observation passed all configured quality checks."
                     : "⚠️ " + Truncate(string.Join("\n⚠️ ", report.Quality.Warnings.ToArray()), 1000);
-                fields.Add(new DiscordField("Measurement quality", qualityText, false));
+                fields.Add(new DiscordField("Current measurement quality", qualityText, false));
             }
 
             DiscordEmbed embed = new DiscordEmbed
@@ -1126,8 +1287,12 @@ namespace Oxide.Plugins
         {
             return (report.Quality != null && !report.Quality.SuitableForComparison)
                    || (report.PreviousBenchmarkComparison != null
-                       && report.PreviousBenchmarkComparison.ContextWarnings != null
-                       && report.PreviousBenchmarkComparison.ContextWarnings.Count > 0);
+                       && !string.Equals(report.PreviousBenchmarkComparison.Confidence, "High", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string FormatComparisonValue(double value, string unit)
+        {
+            return value.ToString("F2", CultureInfo.InvariantCulture) + " " + unit;
         }
 
         private static string FormatMetric(MetricSummary metric, bool useLast)
@@ -1317,6 +1482,7 @@ namespace Oxide.Plugins
                 ? 0
                 : Math.Max(30, _config.ReportIntervalSeconds);
             _config.PerformanceSampleIntervalSeconds = Mathf.Clamp(_config.PerformanceSampleIntervalSeconds, 1f, 60f);
+            _config.BenchmarkSampleIntervalSeconds = Mathf.Clamp(_config.BenchmarkSampleIntervalSeconds, 0.25f, 10f);
             _config.EntityBatchSize = Math.Max(50, Math.Min(10000, _config.EntityBatchSize));
             _config.DefaultBenchmarkDurationSeconds = Math.Max(10, _config.DefaultBenchmarkDurationSeconds);
             _config.MinimumBenchmarkDurationSeconds = Math.Max(5, _config.MinimumBenchmarkDurationSeconds);
@@ -1324,6 +1490,9 @@ namespace Oxide.Plugins
             _config.DefaultBenchmarkDurationSeconds = Math.Min(_config.DefaultBenchmarkDurationSeconds, _config.MaximumBenchmarkDurationSeconds);
             _config.DefaultBenchmarkWarmupSeconds = Math.Max(0, _config.DefaultBenchmarkWarmupSeconds);
             _config.MaximumBenchmarkWarmupSeconds = Math.Max(_config.DefaultBenchmarkWarmupSeconds, _config.MaximumBenchmarkWarmupSeconds);
+            _config.MinimumBenchmarkSamplesForComparison = Math.Max(10, Math.Min(1000, _config.MinimumBenchmarkSamplesForComparison));
+            _config.MinimumPluginHookMillisecondsForComparison = Math.Max(0, _config.MinimumPluginHookMillisecondsForComparison);
+            _config.MaximumNamedBenchmarkReferences = Math.Max(10, Math.Min(1000, _config.MaximumNamedBenchmarkReferences));
             _config.TopPluginCountInConsole = Math.Max(0, Math.Min(25, _config.TopPluginCountInConsole));
             _config.MaximumArchivedReports = Math.Max(0, _config.MaximumArchivedReports);
             _config.MaximumReportAgeDays = Math.Max(0, _config.MaximumReportAgeDays);
@@ -1350,6 +1519,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Performance sampling interval seconds")]
             public float PerformanceSampleIntervalSeconds = 5f;
+
+            [JsonProperty("Benchmark sampling interval seconds")]
+            public float BenchmarkSampleIntervalSeconds = 1f;
 
             [JsonProperty("Entities processed per server frame")]
             public int EntityBatchSize = 750;
@@ -1386,6 +1558,15 @@ namespace Oxide.Plugins
 
             [JsonProperty("Compare each benchmark with the previous benchmark")]
             public bool CompareBenchmarkToPrevious = true;
+
+            [JsonProperty("Minimum benchmark samples for comparison")]
+            public int MinimumBenchmarkSamplesForComparison = 30;
+
+            [JsonProperty("Minimum total plugin hook milliseconds for comparison")]
+            public double MinimumPluginHookMillisecondsForComparison = 5d;
+
+            [JsonProperty("Maximum named benchmark references")]
+            public int MaximumNamedBenchmarkReferences = 100;
 
             [JsonProperty("Top plugin count written to console")]
             public int TopPluginCountInConsole = 10;
@@ -1723,6 +1904,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Context Warnings")]
             public List<string> ContextWarnings;
+
+            [JsonProperty("Comparison Confidence")]
+            public string Confidence;
         }
 
         private class BenchmarkComparisonMetric
@@ -1740,13 +1924,25 @@ namespace Oxide.Plugins
             public double Current;
 
             [JsonProperty("Change Percent")]
-            public double ChangePercent;
+            public double? ChangePercent;
 
             [JsonProperty("Improvement Percent")]
-            public double ImprovementPercent;
+            public double? ImprovementPercent;
 
             [JsonProperty("Result")]
             public string Result;
+
+            [JsonProperty("Reliable")]
+            public bool Reliable;
+
+            [JsonProperty("Note", NullValueHandling = NullValueHandling.Ignore)]
+            public string Note;
+        }
+
+        private class BenchmarkReferenceStore
+        {
+            [JsonProperty("Entries")]
+            public List<BenchmarkReference> Entries;
         }
 
         private class BenchmarkReference
@@ -1757,6 +1953,9 @@ namespace Oxide.Plugins
             public double? AverageFrameTime;
             public double? AverageFrameRate;
             public double? PluginHookMillisecondsPerMinute;
+            public double PluginHookObservedMilliseconds;
+            public double ObservationDurationSeconds;
+            public int SampleCount;
             public int OnlinePlayers;
             public int EntityCount;
             public bool SuitableForComparison;
@@ -1778,6 +1977,11 @@ namespace Oxide.Plugins
                     PluginHookMillisecondsPerMinute = report.Plugins == null || report.Plugins.ObservationDurationSeconds <= 0
                         ? null
                         : (double?)(report.Plugins.ObservedHookTimeTotalSeconds * 60000d / report.Plugins.ObservationDurationSeconds),
+                    PluginHookObservedMilliseconds = report.Plugins == null
+                        ? 0
+                        : report.Plugins.ObservedHookTimeTotalSeconds * 1000d,
+                    ObservationDurationSeconds = report.ObservationDurationSeconds,
+                    SampleCount = report.PerformanceWindow == null ? 0 : report.PerformanceWindow.SampleCount,
                     OnlinePlayers = report.CompletedOnlinePlayers,
                     EntityCount = report.Entities == null ? 0 : report.Entities.Total,
                     SuitableForComparison = report.Quality != null && report.Quality.SuitableForComparison

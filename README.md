@@ -14,7 +14,7 @@ All commands require server-admin access.
 
 - `monitor.report [label]` creates a report from the rolling performance window. After the first report, plugin values include deltas since the preceding report.
 - `monitor.createreport [label]` is a compatibility alias for `monitor.report`.
-- `monitor.benchmark <label> [durationSeconds] [warmupSeconds]` observes a dedicated, labeled window. Defaults are a 15-second warm-up and 300-second observation.
+- `monitor.benchmark <label> [durationSeconds] [warmupSeconds] [baselineLabel]` observes a dedicated, labeled window. Defaults are a 15-second warm-up and 300-second observation. The optional baseline label selects a previously completed benchmark instead of simply using the preceding run.
 - `monitor.status` shows whether a report or benchmark is active.
 
 Recommended A/B workflow:
@@ -22,7 +22,7 @@ Recommended A/B workflow:
 1. Run `monitor.benchmark before-change 300 15` during representative activity.
 2. Make one controlled change.
 3. Recreate similar player/entity/server activity.
-4. Run `monitor.benchmark after-change 300 15`.
+4. Run `monitor.benchmark after-change 300 15 before-change`.
 5. Review the automatic comparison, quality warnings, frame-time percentiles, and per-plugin observed hook time.
 
 Change only one thing between runs. Use several alternating A/B runs when a decision matters; one pair can be distorted by player behavior, saves, garbage collection, entity changes, networking, or game updates.
@@ -43,11 +43,11 @@ Hook time only measures execution visible to the framework's hook accounting. It
 
 ## Benchmark quality and comparison
 
-Every benchmark records average, minimum, maximum, standard deviation, median, P95, and P99 statistics from a bounded sample reservoir. The warm-up occurs before counters and performance samples begin, reducing startup and cache effects.
+Every benchmark records average, minimum, maximum, standard deviation, median, P95, and P99 statistics from a bounded sample reservoir. Benchmarks use a dedicated one-second sampling interval by default, independent of the lower-frequency rolling monitor. The warm-up occurs before counters and performance samples begin, reducing startup and cache effects.
 
-Reports flag known comparison hazards, including player-count changes, too few samples, server saves, plugin load/unload events, and garbage collection. A warning does not invalidate the raw measurements, but it means the before/after conclusion should be treated cautiously.
+Reports flag known comparison hazards, including player-count changes, too few samples, server saves, plugin load/unload events, garbage collection, entity-count differences, and mismatched observation durations. A warning does not invalidate the raw measurements, but it lowers the reported comparison confidence.
 
-When enabled, each completed benchmark is compared with the preceding benchmark. Average frame time, average frame rate, and total measured plugin-hook milliseconds per minute are reported as directional percentage improvements. The previous baseline is stored in `oxide/data/ServerPerformanceAnalyzer/PreviousBenchmark.json`.
+When enabled, each completed benchmark is compared with either the explicitly requested named baseline or the preceding benchmark. Reports show baseline and current values, plain-language improvement/regression wording, and High, Moderate, or Low comparison confidence. Plugin-hook percentage changes are marked inconclusive when either window contains less than the configured noise-floor amount of measured hook time. Named references are retained in `oxide/data/ServerPerformanceAnalyzer/BenchmarkReferences.json`.
 
 ## Discord webhook
 
@@ -82,6 +82,7 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
 {
   "Create automatic reports every seconds (0 disables)": 0,
   "Performance sampling interval seconds": 5.0,
+  "Benchmark sampling interval seconds": 1.0,
   "Entities processed per server frame": 750,
   "Include plugin report": true,
   "Include entity report": true,
@@ -94,6 +95,9 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
   "Default benchmark warm-up seconds": 15,
   "Maximum benchmark warm-up seconds": 300,
   "Compare each benchmark with the previous benchmark": true,
+  "Minimum benchmark samples for comparison": 30,
+  "Minimum total plugin hook milliseconds for comparison": 5.0,
+  "Maximum named benchmark references": 100,
   "Top plugin count written to console": 10,
   "Log entity scan progress": false,
   "Excluded plugins": [],
@@ -111,7 +115,7 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
 }
 ```
 
-Automatic report intervals below 30 seconds are clamped to 30 seconds. Benchmark duration and warm-up are clamped to their configured limits.
+Automatic report intervals below 30 seconds are clamped to 30 seconds. Benchmark duration, warm-up, sampling frequency, quality thresholds, and retained named references are clamped to safe configured limits.
 
 When upgrading from version 2.1.0, the plugin copies the legacy `PerformanceMonitorEnhanced` configuration and report data into the new `ServerPerformanceAnalyzer` locations. Legacy files are retained as a recoverable backup.
 
