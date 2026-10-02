@@ -1,6 +1,6 @@
-# Performance Monitor Enhanced
+# Server Performance Analyzer
 
-Performance Monitor Enhanced is a Rust server plugin for uMod and Carbon. It creates low-impact performance reports and repeatable benchmark windows designed for before/after plugin comparisons.
+Server Performance Analyzer is a Rust server plugin for uMod and Carbon. It creates low-impact performance reports and repeatable benchmark windows designed for before/after plugin comparisons.
 
 ## Why this version exists
 
@@ -47,7 +47,7 @@ Every benchmark records average, minimum, maximum, standard deviation, median, P
 
 Reports flag known comparison hazards, including player-count changes, too few samples, server saves, plugin load/unload events, and garbage collection. A warning does not invalidate the raw measurements, but it means the before/after conclusion should be treated cautiously.
 
-When enabled, each completed benchmark is compared with the preceding benchmark. Average frame time, average frame rate, and total measured plugin-hook milliseconds per minute are reported as directional percentage improvements. The previous baseline is stored in `oxide/data/PerformanceMonitorEnhanced/PreviousBenchmark.json`.
+When enabled, each completed benchmark is compared with the preceding benchmark. Average frame time, average frame rate, and total measured plugin-hook milliseconds per minute are reported as directional percentage improvements. The previous baseline is stored in `oxide/data/ServerPerformanceAnalyzer/PreviousBenchmark.json`.
 
 ## Discord webhook
 
@@ -59,11 +59,11 @@ An optional role ID can be mentioned. Mentions are restricted to that configured
 
 Archived reports are written to:
 
-`oxide/data/PerformanceMonitorEnhanced/Reports/yyyy-MM-dd/`
+`oxide/data/ServerPerformanceAnalyzer/Reports/yyyy-MM-dd/`
 
 The optional convenience copy is:
 
-`oxide/data/PerformanceMonitorEnhanced/Latest.json`
+`oxide/data/ServerPerformanceAnalyzer/Latest.json`
 
 Reports use UTC timestamps and collision-resistant IDs. Old archives are removed according to the configured maximum count and age.
 
@@ -102,7 +102,7 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
     "Enabled": false,
     "Webhook URL": "",
     "Only send benchmark reports": true,
-    "Username": "Performance Monitor Enhanced",
+    "Username": "Server Performance Analyzer",
     "Avatar URL": "",
     "Role ID to mention (empty disables mentions)": "",
     "Top plugin count": 10,
@@ -112,6 +112,8 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
 ```
 
 Automatic report intervals below 30 seconds are clamped to 30 seconds. Benchmark duration and warm-up are clamped to their configured limits.
+
+When upgrading from version 2.1.0, the plugin copies the legacy `PerformanceMonitorEnhanced` configuration and report data into the new `ServerPerformanceAnalyzer` locations. Legacy files are retained as a recoverable backup.
 
 ## Credits and license
 

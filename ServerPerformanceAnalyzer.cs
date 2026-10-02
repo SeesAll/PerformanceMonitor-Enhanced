@@ -14,15 +14,18 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Performance Monitor Enhanced", "SeesAll", "2.1.0")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.2.0")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
-    public class PerformanceMonitorEnhanced : RustPlugin
+    public class ServerPerformanceAnalyzer : RustPlugin
     {
         private const string ReportCommand = "monitor.report";
         private const string LegacyReportCommand = "monitor.createreport";
         private const string BenchmarkCommand = "monitor.benchmark";
         private const string StatusCommand = "monitor.status";
-        private const string DataRoot = "PerformanceMonitorEnhanced";
+        private const string DataRoot = "ServerPerformanceAnalyzer";
+        private const string LegacyDataRoot = "PerformanceMonitorEnhanced";
+        private const string CurrentConfigFileName = "ServerPerformanceAnalyzer.json";
+        private const string LegacyConfigFileName = "PerformanceMonitorEnhanced.json";
 
         private Configuration _config;
         private Timer _reportTimer;
@@ -58,6 +61,8 @@ namespace Oxide.Plugins
 
         private void Init()
         {
+            CopyLegacyDataIfNeeded();
+
             cmd.AddConsoleCommand(ReportCommand, this, nameof(HandleReportCommand));
             cmd.AddConsoleCommand(LegacyReportCommand, this, nameof(HandleReportCommand));
             cmd.AddConsoleCommand(BenchmarkCommand, this, nameof(HandleBenchmarkCommand));
@@ -183,7 +188,7 @@ namespace Oxide.Plugins
 
             if (!_reportRunning)
             {
-                Reply(arg, "Performance Monitor Enhanced is idle.");
+                Reply(arg, "Server Performance Analyzer is idle.");
                 return;
             }
 
@@ -1105,7 +1110,7 @@ namespace Oxide.Plugins
             string roleId = NormalizeDiscordId(discord.MentionRoleId);
             return new DiscordPayload
             {
-                Username = string.IsNullOrWhiteSpace(discord.Username) ? "Performance Monitor Enhanced" : Truncate(discord.Username, 80),
+                Username = string.IsNullOrWhiteSpace(discord.Username) ? "Server Performance Analyzer" : Truncate(discord.Username, 80),
                 AvatarUrl = string.IsNullOrWhiteSpace(discord.AvatarUrl) ? null : discord.AvatarUrl,
                 Content = roleId == null ? null : "<@&" + roleId + ">",
                 AllowedMentions = new DiscordAllowedMentions
@@ -1212,6 +1217,7 @@ namespace Oxide.Plugins
 
         protected override void LoadConfig()
         {
+            CopyLegacyConfigIfNeeded();
             base.LoadConfig();
 
             try
@@ -1242,6 +1248,69 @@ namespace Oxide.Plugins
             Config.WriteObject(_config, true);
         }
 
+        private void CopyLegacyConfigIfNeeded()
+        {
+            try
+            {
+                string currentPath = Path.Combine(Interface.Oxide.ConfigDirectory, CurrentConfigFileName);
+                string legacyPath = Path.Combine(Interface.Oxide.ConfigDirectory, LegacyConfigFileName);
+                if (!File.Exists(currentPath) && File.Exists(legacyPath))
+                {
+                    File.Copy(legacyPath, currentPath, false);
+                    Puts("Copied the legacy configuration to " + CurrentConfigFileName + ".");
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintWarning("Unable to copy the legacy configuration: " + ex.Message);
+            }
+        }
+
+        private void CopyLegacyDataIfNeeded()
+        {
+            string legacyRoot = Path.Combine(Interface.Oxide.DataDirectory, LegacyDataRoot);
+            string currentRoot = Path.Combine(Interface.Oxide.DataDirectory, DataRoot);
+            if (!Directory.Exists(legacyRoot))
+            {
+                return;
+            }
+
+            try
+            {
+                string[] files = Directory.GetFiles(legacyRoot, "*", SearchOption.AllDirectories);
+                int copied = 0;
+                for (int i = 0; i < files.Length; i++)
+                {
+                    string relativePath = files[i].Substring(legacyRoot.Length)
+                        .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                    string destination = Path.Combine(currentRoot, relativePath);
+                    if (File.Exists(destination))
+                    {
+                        continue;
+                    }
+
+                    string destinationDirectory = Path.GetDirectoryName(destination);
+                    if (!string.IsNullOrEmpty(destinationDirectory))
+                    {
+                        Directory.CreateDirectory(destinationDirectory);
+                    }
+
+                    File.Copy(files[i], destination, false);
+                    copied++;
+                }
+
+                if (copied > 0)
+                {
+                    Puts(string.Format(CultureInfo.InvariantCulture,
+                        "Copied {0} legacy data file(s) into {1}.", copied, DataRoot));
+                }
+            }
+            catch (Exception ex)
+            {
+                PrintWarning("Unable to copy legacy report data: " + ex.Message);
+            }
+        }
+
         private void ValidateConfiguration()
         {
             _config.ReportIntervalSeconds = _config.ReportIntervalSeconds <= 0
@@ -1262,6 +1331,10 @@ namespace Oxide.Plugins
             _config.ExcludedEntities = _config.ExcludedEntities ?? new string[0];
             _config.Discord = _config.Discord ?? new DiscordConfiguration();
             _config.Discord.TopPluginCount = Math.Max(1, Math.Min(15, _config.Discord.TopPluginCount));
+            if (string.Equals(_config.Discord.Username, "Performance Monitor Enhanced", StringComparison.Ordinal))
+            {
+                _config.Discord.Username = "Server Performance Analyzer";
+            }
         }
 
         private void RebuildExclusionCaches()
@@ -1347,7 +1420,7 @@ namespace Oxide.Plugins
             public bool OnlySendBenchmarks = true;
 
             [JsonProperty("Username")]
-            public string Username = "Performance Monitor Enhanced";
+            public string Username = "Server Performance Analyzer";
 
             [JsonProperty("Avatar URL")]
             public string AvatarUrl = string.Empty;

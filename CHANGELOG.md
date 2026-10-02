@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.2.0
+
+- Renamed the plugin to Server Performance Analyzer.
+- Added automatic, non-destructive migration of the legacy configuration and report data.
+- Kept the existing `monitor.*` commands for operational compatibility.
+
 ## 2.1.0
 
 - Added configurable benchmark warm-up periods.
