@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3.1
+
+- Clarified that missing sample counts from pre-schema-3 baselines are unavailable rather than literal zero-sample observations.
+
 ## 2.3.0
 
 - Added an independent one-second benchmark sampling interval.

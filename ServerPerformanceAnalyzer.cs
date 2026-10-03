@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.3.0")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.3.1")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -890,12 +890,20 @@ namespace Oxide.Plugins
                 comparison.ContextWarnings.Add("One or both benchmark windows contain quality warnings.");
             }
 
-            if (baseline.SampleCount < _config.MinimumBenchmarkSamplesForComparison
-                || current.SampleCount < _config.MinimumBenchmarkSamplesForComparison)
+            bool baselineSampleCountAvailable = baseline.SampleCount.HasValue && baseline.SampleCount.Value > 0;
+            int currentSampleCount = current.SampleCount ?? 0;
+            if (!baselineSampleCountAvailable)
+            {
+                comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
+                    "Baseline sample count is unavailable because it predates schema 3; current {0}, required {1}.",
+                    currentSampleCount, _config.MinimumBenchmarkSamplesForComparison));
+            }
+            else if (baseline.SampleCount.Value < _config.MinimumBenchmarkSamplesForComparison
+                     || currentSampleCount < _config.MinimumBenchmarkSamplesForComparison)
             {
                 comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
                     "Insufficient samples for a robust comparison: baseline {0}, current {1}, required {2}.",
-                    baseline.SampleCount, current.SampleCount, _config.MinimumBenchmarkSamplesForComparison));
+                    baseline.SampleCount.Value, currentSampleCount, _config.MinimumBenchmarkSamplesForComparison));
             }
 
             if (comparison.ContextWarnings.Count > 0)
@@ -1955,7 +1963,7 @@ namespace Oxide.Plugins
             public double? PluginHookMillisecondsPerMinute;
             public double PluginHookObservedMilliseconds;
             public double ObservationDurationSeconds;
-            public int SampleCount;
+            public int? SampleCount;
             public int OnlinePlayers;
             public int EntityCount;
             public bool SuitableForComparison;
@@ -1981,7 +1989,7 @@ namespace Oxide.Plugins
                         ? 0
                         : report.Plugins.ObservedHookTimeTotalSeconds * 1000d,
                     ObservationDurationSeconds = report.ObservationDurationSeconds,
-                    SampleCount = report.PerformanceWindow == null ? 0 : report.PerformanceWindow.SampleCount,
+                    SampleCount = report.PerformanceWindow == null ? null : (int?)report.PerformanceWindow.SampleCount,
                     OnlinePlayers = report.CompletedOnlinePlayers,
                     EntityCount = report.Entities == null ? 0 : report.Entities.Total,
                     SuitableForComparison = report.Quality != null && report.Quality.SuitableForComparison
