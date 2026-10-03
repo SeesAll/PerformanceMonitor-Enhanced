@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.6.1")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.6.2")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -23,6 +23,7 @@ namespace Oxide.Plugins
         private const string BenchmarkCommand = "monitor.benchmark";
         private const string BenchmarkSetCommand = "monitor.benchmarkset";
         private const string StatusCommand = "monitor.status";
+        private const string DefaultBenchmarkLabel = "performance-benchmark";
         private const string DataRoot = "ServerPerformanceAnalyzer";
         private const string LegacyDataRoot = "PerformanceMonitorEnhanced";
         private const string CurrentConfigFileName = "ServerPerformanceAnalyzer.json";
@@ -162,18 +163,21 @@ namespace Oxide.Plugins
                 return;
             }
 
-            string label = GetArgument(arg, 0, null);
-            if (string.IsNullOrWhiteSpace(label))
-            {
-                Reply(arg, "Usage: monitor.benchmark <label> [duration seconds] [warm-up seconds] [baseline label]");
-                return;
-            }
+            string firstArgument = GetArgument(arg, 0, null);
+            int parsedDuration;
+            bool durationComesFirst = !string.IsNullOrWhiteSpace(firstArgument)
+                                      && int.TryParse(firstArgument, NumberStyles.Integer,
+                                          CultureInfo.InvariantCulture, out parsedDuration);
+            string label = string.IsNullOrWhiteSpace(firstArgument) || durationComesFirst
+                ? DefaultBenchmarkLabel
+                : firstArgument;
+            int argumentOffset = durationComesFirst ? 0 : 1;
 
-            int duration = GetIntArgument(arg, 1, _config.DefaultBenchmarkDurationSeconds);
+            int duration = GetIntArgument(arg, argumentOffset, _config.DefaultBenchmarkDurationSeconds);
             duration = Math.Max(_config.MinimumBenchmarkDurationSeconds, Math.Min(_config.MaximumBenchmarkDurationSeconds, duration));
-            int warmup = GetIntArgument(arg, 2, _config.DefaultBenchmarkWarmupSeconds);
+            int warmup = GetIntArgument(arg, argumentOffset + 1, _config.DefaultBenchmarkWarmupSeconds);
             warmup = Math.Max(0, Math.Min(_config.MaximumBenchmarkWarmupSeconds, warmup));
-            string baselineLabel = GetArgument(arg, 3, null);
+            string baselineLabel = GetArgument(arg, argumentOffset + 2, null);
             baselineLabel = string.IsNullOrWhiteSpace(baselineLabel) ? null : NormalizeLabel(baselineLabel);
 
             if (TryStartReport(label, duration, warmup, baselineLabel, true, arg))
@@ -1782,16 +1786,22 @@ namespace Oxide.Plugins
                 fields.Add(new DiscordField("Current measurement quality", qualityText, false));
             }
 
+            string title = isBenchmarkSet
+                ? "Performance Benchmark Set"
+                : report.Mode == "benchmark" ? "Performance Benchmark" : "Performance Report";
+            if (!(report.Mode == "benchmark"
+                  && string.Equals(report.Label, DefaultBenchmarkLabel, StringComparison.OrdinalIgnoreCase)))
+            {
+                title += ": " + Truncate(EscapeDiscordMarkdown(report.Label), 200);
+            }
+
             DiscordEmbed embed = new DiscordEmbed
             {
                 Author = new DiscordAuthor
                 {
                     Name = Truncate("SERVER • " + serverDescription, 256)
                 },
-                Title = (isBenchmarkSet
-                            ? "Performance benchmark set: "
-                            : report.Mode == "benchmark" ? "Performance benchmark: " : "Performance report: ")
-                        + Truncate(EscapeDiscordMarkdown(report.Label), 200),
+                Title = title,
                 Description = isBenchmarkSet
                     ? "A repeated benchmark set completed. Central values are medians across runs; full member reports remain on the server."
                     : report.Mode == "benchmark"

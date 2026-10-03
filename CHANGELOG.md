@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.6.2
+
+- Added an unlabeled routine form of the benchmark command, such as `monitor.benchmark 30 0`.
+- Routine Discord reports now use the clean `Performance Benchmark` title while named before/after runs retain their labels.
+
 ## 2.6.1
 
 - Promoted the source server to a dedicated Discord header above the report title.

@@ -14,7 +14,7 @@ All commands require server-admin access.
 
 - `monitor.report [label]` creates a report from the rolling performance window. After the first report, plugin values include deltas since the preceding report.
 - `monitor.createreport [label]` is a compatibility alias for `monitor.report`.
-- `monitor.benchmark <label> [durationSeconds] [warmupSeconds] [baselineLabel]` observes a dedicated, labeled window. Defaults are a 15-second warm-up and 300-second observation. The optional baseline label selects a previously completed benchmark instead of simply using the preceding run.
+- `monitor.benchmark [label] [durationSeconds] [warmupSeconds] [baselineLabel]` observes a dedicated window. Omit the label by placing the duration first, such as `monitor.benchmark 30 0`, for a routine Discord report titled `Performance Benchmark`. Named runs retain their labels for controlled comparisons. Defaults are a 15-second warm-up and 300-second observation. The optional baseline label selects a previously completed benchmark instead of simply using the preceding run.
 - `monitor.benchmarkset <label> [runs] [durationSeconds] [warmupSeconds] [baselineLabel]` runs 2–20 consecutive benchmark windows and sends one aggregate Discord report. Central values are medians across runs, ranges expose variability, and every member report remains archived as raw JSON.
 - `monitor.status` shows whether a report or benchmark is active.
 
