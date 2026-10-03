@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.6.0
+
+- Added a Discord server-description setting so reports clearly identify their source server.
+- Automatically uses Rust's live `server.hostname` when the description override is blank.
+- Falls back to the server identity and then `Unknown server` if no hostname is available.
+
 ## 2.5.1
 
 - Made benchmark sets without an explicit baseline establish a new aggregate baseline instead of auto-comparing with an incompatible preceding single run.

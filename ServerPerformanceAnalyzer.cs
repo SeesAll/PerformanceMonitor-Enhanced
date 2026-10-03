@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.5.1")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.6.0")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -1626,8 +1626,10 @@ namespace Oxide.Plugins
         {
             List<DiscordField> fields = new List<DiscordField>();
             bool isBenchmarkSet = report.Mode == "benchmark-set";
+            string serverDescription = ResolveDiscordServerDescription(discord);
             string context = string.Format(CultureInfo.InvariantCulture,
-                "**Mode:** {0}\n**Observation:** {1:F1}s\n**Players:** {2}\n**Entities:** {3}\n**Samples:** {4}{5}",
+                "**Server:** {0}\n**Mode:** {1}\n**Observation:** {2:F1}s\n**Players:** {3}\n**Entities:** {4}\n**Samples:** {5}{6}",
+                serverDescription,
                 EscapeDiscordMarkdown(report.Mode),
                 report.ObservationDurationSeconds,
                 FormatWorkloadMetric(report.WorkloadWindow == null ? null : report.WorkloadWindow.OnlinePlayers,
@@ -1814,6 +1816,28 @@ namespace Oxide.Plugins
                 },
                 Embeds = new List<DiscordEmbed> { embed }
             };
+        }
+
+        private static string ResolveDiscordServerDescription(DiscordConfiguration discord)
+        {
+            string description = discord == null ? null : discord.ServerDescription;
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                description = ConVar.Server.hostname;
+            }
+
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                description = ConVar.Server.identity;
+            }
+
+            if (string.IsNullOrWhiteSpace(description))
+            {
+                description = "Unknown server";
+            }
+
+            description = description.Trim().Replace('\r', ' ').Replace('\n', ' ');
+            return EscapeDiscordMarkdown(Truncate(description, 200));
         }
 
         private static bool HasComparisonWarnings(PerformanceReport report)
@@ -2101,6 +2125,7 @@ namespace Oxide.Plugins
             _config.ExcludedPlugins = _config.ExcludedPlugins ?? new string[0];
             _config.ExcludedEntities = _config.ExcludedEntities ?? new string[0];
             _config.Discord = _config.Discord ?? new DiscordConfiguration();
+            _config.Discord.ServerDescription = _config.Discord.ServerDescription ?? string.Empty;
             _config.Discord.TopPluginCount = Math.Max(1, Math.Min(15, _config.Discord.TopPluginCount));
             if (string.Equals(_config.Discord.Username, "Performance Monitor Enhanced", StringComparison.Ordinal))
             {
@@ -2207,6 +2232,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Webhook URL")]
             public string WebhookUrl = string.Empty;
+
+            [JsonProperty("Server description (empty uses server hostname)")]
+            public string ServerDescription = string.Empty;
 
             [JsonProperty("Only send benchmark reports")]
             public bool OnlySendBenchmarks = true;

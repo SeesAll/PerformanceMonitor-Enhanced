@@ -58,7 +58,7 @@ When enabled, each completed benchmark is compared with either the explicitly re
 
 ## Discord webhook
 
-Discord delivery is opt-in. Add the webhook URL to the generated config on the server; never commit it to Git. By default, only benchmark reports are sent. The embed contains run context, frame performance, highest-impact plugins, comparison results, and measurement-quality warnings. Full JSON remains on the server.
+Discord delivery is opt-in. Add the webhook URL to the generated config on the server; never commit it to Git. By default, only benchmark reports are sent. Every embed identifies its source server. Leave `Server description (empty uses server hostname)` blank to use Rust's live `server.hostname`, or set a short override such as `2x` or `NA 3x`. The embed contains run context, frame performance, highest-impact plugins, comparison results, and measurement-quality warnings. Full JSON remains on the server.
 
 An optional role ID can be mentioned. Mentions are restricted to that configured role, and report labels/plugin names are escaped before being placed in the embed.
 
@@ -115,6 +115,7 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
   "Discord webhook": {
     "Enabled": false,
     "Webhook URL": "",
+    "Server description (empty uses server hostname)": "",
     "Only send benchmark reports": true,
     "Username": "Server Performance Analyzer",
     "Avatar URL": "",
