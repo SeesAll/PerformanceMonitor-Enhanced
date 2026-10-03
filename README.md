@@ -15,6 +15,7 @@ All commands require server-admin access.
 - `monitor.report [label]` creates a report from the rolling performance window. After the first report, plugin values include deltas since the preceding report.
 - `monitor.createreport [label]` is a compatibility alias for `monitor.report`.
 - `monitor.benchmark <label> [durationSeconds] [warmupSeconds] [baselineLabel]` observes a dedicated, labeled window. Defaults are a 15-second warm-up and 300-second observation. The optional baseline label selects a previously completed benchmark instead of simply using the preceding run.
+- `monitor.benchmarkset <label> [runs] [durationSeconds] [warmupSeconds] [baselineLabel]` runs 2–20 consecutive benchmark windows and sends one aggregate Discord report. Central values are medians across runs, ranges expose variability, and every member report remains archived as raw JSON.
 - `monitor.status` shows whether a report or benchmark is active.
 
 Recommended A/B workflow:
@@ -27,6 +28,8 @@ Recommended A/B workflow:
 
 Change only one thing between runs. Use several alternating A/B runs when a decision matters; one pair can be distorted by player behavior, saves, garbage collection, entity changes, networking, or game updates.
 
+For higher-confidence work, prefer `monitor.benchmarkset before-change 3 300 15`, make one controlled change, then run `monitor.benchmarkset after-change 3 300 15 before-change`. Only the aggregate set report is sent to Discord, avoiding one message per member run.
+
 ## Plugin impact metrics
 
 Plugins are ranked by hook time accumulated during the observation window. Each entry includes:
@@ -37,6 +40,8 @@ Plugins are ranked by hook time accumulated during the observation window. Each 
 - cumulative hook time for context;
 - the framework memory counter and its change during the window.
 
+Discord also shows the total measured plugin-hook load as milliseconds per second, milliseconds per minute, and an approximate percentage of one main thread. Relative plugin share identifies who dominates measured plugin work; absolute load shows whether that work is large enough to matter to the server as a whole.
+
 On uMod, the memory value is cumulative hook allocation. On Carbon, it is the framework's current-memory estimate. These values have different semantics and should not be compared across frameworks.
 
 Hook time only measures execution visible to the framework's hook accounting. It may not capture background work, native calls, external services, or all work scheduled by a plugin.
@@ -44,6 +49,8 @@ Hook time only measures execution visible to the framework's hook accounting. It
 ## Benchmark quality and comparison
 
 Every benchmark records average, minimum, maximum, standard deviation, median, P95, and P99 statistics from a bounded sample reservoir. Benchmarks use a dedicated one-second sampling interval by default, independent of the lower-frequency rolling monitor. The warm-up occurs before counters and performance samples begin, reducing startup and cache effects.
+
+Player and networked-entity counts are sampled throughout each benchmark. Comparisons use average observed workload rather than only start/end snapshots. Benchmark sets summarize the median and range of run-level frame time, plugin load, players, and entities.
 
 Reports flag known comparison hazards, including player-count changes, too few samples, server saves, plugin load/unload events, garbage collection, entity-count differences, and mismatched observation durations. A warning does not invalidate the raw measurements, but it lowers the reported comparison confidence.
 
@@ -94,6 +101,9 @@ Reports use UTC timestamps and collision-resistant IDs. Old archives are removed
   "Maximum benchmark duration seconds": 3600,
   "Default benchmark warm-up seconds": 15,
   "Maximum benchmark warm-up seconds": 300,
+  "Default benchmark set runs": 3,
+  "Maximum benchmark set runs": 10,
+  "Benchmark set cooldown seconds": 5.0,
   "Compare each benchmark with the previous benchmark": true,
   "Minimum benchmark samples for comparison": 30,
   "Minimum total plugin hook milliseconds for comparison": 5.0,

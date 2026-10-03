@@ -14,13 +14,14 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.4.0")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.5.0")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
         private const string ReportCommand = "monitor.report";
         private const string LegacyReportCommand = "monitor.createreport";
         private const string BenchmarkCommand = "monitor.benchmark";
+        private const string BenchmarkSetCommand = "monitor.benchmarkset";
         private const string StatusCommand = "monitor.status";
         private const string DataRoot = "ServerPerformanceAnalyzer";
         private const string LegacyDataRoot = "PerformanceMonitorEnhanced";
@@ -40,6 +41,7 @@ namespace Oxide.Plugins
         private HashSet<string> _excludedPlugins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private HashSet<string> _excludedEntities = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly List<EnvironmentEvent> _environmentEvents = new List<EnvironmentEvent>();
+        private BenchmarkSetExecution _activeBenchmarkSet;
 
         private static readonly MetricDefinition[] PerformanceMetrics =
         {
@@ -66,6 +68,7 @@ namespace Oxide.Plugins
             cmd.AddConsoleCommand(ReportCommand, this, nameof(HandleReportCommand));
             cmd.AddConsoleCommand(LegacyReportCommand, this, nameof(HandleReportCommand));
             cmd.AddConsoleCommand(BenchmarkCommand, this, nameof(HandleBenchmarkCommand));
+            cmd.AddConsoleCommand(BenchmarkSetCommand, this, nameof(HandleBenchmarkSetCommand));
             cmd.AddConsoleCommand(StatusCommand, this, nameof(HandleStatusCommand));
 
             RebuildExclusionCaches();
@@ -108,6 +111,7 @@ namespace Oxide.Plugins
             }
 
             _reportRunning = false;
+            _activeBenchmarkSet = null;
         }
 
         private void OnServerSave()
@@ -181,6 +185,54 @@ namespace Oxide.Plugins
             }
         }
 
+        private void HandleBenchmarkSetCommand(ConsoleSystem.Arg arg)
+        {
+            if (!IsAuthorized(arg))
+            {
+                Reply(arg, "You do not have permission to run performance benchmark sets.");
+                return;
+            }
+
+            string label = GetArgument(arg, 0, null);
+            if (string.IsNullOrWhiteSpace(label))
+            {
+                Reply(arg, "Usage: monitor.benchmarkset <label> [runs] [duration seconds] [warm-up seconds] [baseline label]");
+                return;
+            }
+
+            if (_reportRunning || _activeBenchmarkSet != null)
+            {
+                Reply(arg, "A report or benchmark set is already running.");
+                return;
+            }
+
+            int runs = GetIntArgument(arg, 1, _config.DefaultBenchmarkSetRuns);
+            runs = Math.Max(2, Math.Min(_config.MaximumBenchmarkSetRuns, runs));
+            int duration = GetIntArgument(arg, 2, _config.DefaultBenchmarkDurationSeconds);
+            duration = Math.Max(_config.MinimumBenchmarkDurationSeconds, Math.Min(_config.MaximumBenchmarkDurationSeconds, duration));
+            int warmup = GetIntArgument(arg, 3, _config.DefaultBenchmarkWarmupSeconds);
+            warmup = Math.Max(0, Math.Min(_config.MaximumBenchmarkWarmupSeconds, warmup));
+            string baselineLabel = GetArgument(arg, 4, null);
+            baselineLabel = string.IsNullOrWhiteSpace(baselineLabel) ? null : NormalizeLabel(baselineLabel);
+
+            _activeBenchmarkSet = new BenchmarkSetExecution
+            {
+                Label = NormalizeLabel(label),
+                RequestedRuns = runs,
+                DurationSeconds = duration,
+                WarmupSeconds = warmup,
+                BaselineLabel = baselineLabel,
+                StartedUtc = DateTime.UtcNow,
+                Reports = new List<PerformanceReport>()
+            };
+
+            StartNextBenchmarkSetRun();
+            Reply(arg, string.Format(CultureInfo.InvariantCulture,
+                "Benchmark set '{0}' started: {1} runs, {2}s warm-up and {3}s observation per run{4}. Only the aggregate will be sent to Discord.",
+                _activeBenchmarkSet.Label, runs, warmup, duration,
+                baselineLabel == null ? string.Empty : " against baseline '" + baselineLabel + "'"));
+        }
+
         private void HandleStatusCommand(ConsoleSystem.Arg arg)
         {
             if (!IsAuthorized(arg))
@@ -189,16 +241,26 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (!_reportRunning)
+            if (!_reportRunning && _activeBenchmarkSet == null)
             {
                 Reply(arg, "Server Performance Analyzer is idle.");
                 return;
             }
 
+            if (_activeBenchmarkSet != null)
+            {
+                Reply(arg, string.Format(CultureInfo.InvariantCulture,
+                    "Benchmark set '{0}' is on run {1}/{2}; the active run has been running for {3:F1} seconds.",
+                    _activeBenchmarkSet.Label,
+                    Math.Min(_activeBenchmarkSet.Reports.Count + 1, _activeBenchmarkSet.RequestedRuns),
+                    _activeBenchmarkSet.RequestedRuns,
+                    _reportRunning ? (DateTime.UtcNow - _activeStartedUtc).TotalSeconds : 0));
+                return;
+            }
+
             Reply(arg, string.Format(CultureInfo.InvariantCulture,
                 "A report for '{0}' has been running for {1:F1} seconds.",
-                _activeLabel,
-                (DateTime.UtcNow - _activeStartedUtc).TotalSeconds));
+                _activeLabel, (DateTime.UtcNow - _activeStartedUtc).TotalSeconds));
         }
 
         private bool IsAuthorized(ConsoleSystem.Arg arg)
@@ -237,17 +299,73 @@ namespace Oxide.Plugins
 
         #region Report orchestration
 
+        private void StartNextBenchmarkSetRun()
+        {
+            BenchmarkSetExecution set = _activeBenchmarkSet;
+            if (set == null || set.Reports.Count >= set.RequestedRuns)
+            {
+                return;
+            }
+
+            string runLabel = set.Label + "-run-" + (set.Reports.Count + 1).ToString(CultureInfo.InvariantCulture);
+            if (!TryStartReport(runLabel, set.DurationSeconds, set.WarmupSeconds, null, true, null))
+            {
+                PrintError("Unable to start benchmark-set run '" + runLabel + "'.");
+                _activeBenchmarkSet = null;
+            }
+        }
+
+        private void ContinueBenchmarkSet(BenchmarkSetExecution set)
+        {
+            if (_activeBenchmarkSet != set)
+            {
+                return;
+            }
+
+            if (set.Reports.Count < set.RequestedRuns)
+            {
+                StartNextBenchmarkSetRun();
+                return;
+            }
+
+            try
+            {
+                PerformanceReport aggregate = BuildBenchmarkSetReport(set);
+                bool createComparison = _config.CompareBenchmarkToPrevious || set.BaselineLabel != null;
+                aggregate.PreviousBenchmarkComparison = BuildAndStoreBenchmarkComparison(
+                    aggregate, set.BaselineLabel, createComparison);
+                SaveReport(aggregate);
+                LogSummary(aggregate);
+                SendDiscordReport(aggregate);
+                Puts(string.Format(CultureInfo.InvariantCulture,
+                    "Benchmark set '{0}' completed with {1} runs. Aggregate report ID: {2}",
+                    set.Label, set.Reports.Count, aggregate.ReportId));
+            }
+            catch (Exception ex)
+            {
+                PrintError("Unable to finalize benchmark set: " + ex);
+            }
+            finally
+            {
+                _activeBenchmarkSet = null;
+            }
+        }
+
         private bool TryStartReport(string requestedLabel, int benchmarkDurationSeconds, int warmupSeconds, string baselineLabel, bool benchmark, ConsoleSystem.Arg requester)
         {
-            if (_reportRunning)
+            string normalizedLabel = NormalizeLabel(requestedLabel);
+            bool belongsToActiveSet = _activeBenchmarkSet != null
+                                      && normalizedLabel.StartsWith(_activeBenchmarkSet.Label + "-run-", StringComparison.OrdinalIgnoreCase);
+            if (_reportRunning || (_activeBenchmarkSet != null && !belongsToActiveSet))
             {
                 Reply(requester, string.Format(CultureInfo.InvariantCulture,
-                    "A report for '{0}' is already running.", _activeLabel));
+                    "A report or benchmark set for '{0}' is already running.",
+                    _activeBenchmarkSet == null ? _activeLabel : _activeBenchmarkSet.Label));
                 return false;
             }
 
             _reportRunning = true;
-            _activeLabel = NormalizeLabel(requestedLabel);
+            _activeLabel = normalizedLabel;
             _activeStartedUtc = DateTime.UtcNow;
             _activeCoroutine = ServerMgr.Instance.StartCoroutine(
                 CreateReport(_activeLabel, benchmarkDurationSeconds, warmupSeconds, baselineLabel, benchmark));
@@ -258,9 +376,12 @@ namespace Oxide.Plugins
         {
             Stopwatch totalStopwatch = Stopwatch.StartNew();
             DateTime startedUtc = DateTime.UtcNow;
+            BenchmarkSetExecution benchmarkSet = _activeBenchmarkSet;
+            bool isBenchmarkSetRun = benchmarkSet != null
+                                     && label.StartsWith(benchmarkSet.Label + "-run-", StringComparison.OrdinalIgnoreCase);
             PerformanceReport report = new PerformanceReport
             {
-                SchemaVersion = 4,
+                SchemaVersion = 5,
                 ReportId = Guid.NewGuid().ToString("N"),
                 Label = label,
                 Mode = benchmark ? "benchmark" : "snapshot",
@@ -273,6 +394,7 @@ namespace Oxide.Plugins
             Exception failure = null;
             Dictionary<string, PluginCounter> benchmarkStartCounters = null;
             PerformanceAccumulator completedPerformanceWindow = null;
+            WorkloadAccumulator completedWorkloadWindow = null;
 
             try
             {
@@ -291,18 +413,22 @@ namespace Oxide.Plugins
                     if (failure == null)
                     {
                         completedPerformanceWindow = new PerformanceAccumulator(DateTime.UtcNow, PerformanceMetrics);
+                        completedWorkloadWindow = new WorkloadAccumulator(DateTime.UtcNow);
                         Stopwatch benchmarkStopwatch = Stopwatch.StartNew();
 
                         while (benchmarkStopwatch.Elapsed.TotalSeconds < benchmarkDurationSeconds)
                         {
                             completedPerformanceWindow.Capture(Performance.current);
+                            completedWorkloadWindow.Capture(BasePlayer.activePlayerList.Count, BaseNetworkable.serverEntities.Count);
                             float remaining = (float)(benchmarkDurationSeconds - benchmarkStopwatch.Elapsed.TotalSeconds);
                             float delay = Mathf.Min(_config.BenchmarkSampleIntervalSeconds, Mathf.Max(0.05f, remaining));
                             yield return new WaitForSecondsRealtime(delay);
                         }
 
                         completedPerformanceWindow.Capture(Performance.current);
+                        completedWorkloadWindow.Capture(BasePlayer.activePlayerList.Count, BaseNetworkable.serverEntities.Count);
                         completedPerformanceWindow.Close(DateTime.UtcNow);
+                        completedWorkloadWindow.Close(DateTime.UtcNow);
                         report.ObservationCompletedUtc = DateTime.UtcNow;
                         report.ObservationDurationSeconds = benchmarkStopwatch.Elapsed.TotalSeconds;
                     }
@@ -335,7 +461,7 @@ namespace Oxide.Plugins
                         ? benchmarkStartCounters
                         : _previousPluginCounters;
                     DateTime? baselineCapturedUtc = benchmark
-                        ? (DateTime?)startedUtc
+                        ? (DateTime?)report.ObservationStartedUtc
                         : _previousPluginCaptureUtc;
 
                     report.Plugins = BuildPluginReport(currentCounters, baselineCounters, baselineCapturedUtc, DateTime.UtcNow);
@@ -350,6 +476,11 @@ namespace Oxide.Plugins
                 if (completedPerformanceWindow != null)
                 {
                     report.PerformanceWindow = completedPerformanceWindow.CreateReport();
+                }
+
+                if (completedWorkloadWindow != null)
+                {
+                    report.WorkloadWindow = completedWorkloadWindow.CreateReport();
                 }
 
                 if (failure == null && _config.IncludeEntityReport)
@@ -397,7 +528,7 @@ namespace Oxide.Plugins
                 report.TotalReportDurationSeconds = totalStopwatch.Elapsed.TotalSeconds;
                 report.Quality = BuildQualityReport(report);
 
-                if (benchmark && failure == null)
+                if (benchmark && failure == null && !isBenchmarkSetRun)
                 {
                     bool createComparison = _config.CompareBenchmarkToPrevious || baselineLabel != null;
                     report.PreviousBenchmarkComparison = BuildAndStoreBenchmarkComparison(report, baselineLabel, createComparison);
@@ -409,11 +540,19 @@ namespace Oxide.Plugins
                     PrintError("Performance report failed: " + failure);
                 }
 
+                if (isBenchmarkSetRun)
+                {
+                    benchmarkSet.Reports.Add(report);
+                }
+
                 try
                 {
                     SaveReport(report);
                     LogSummary(report);
-                    SendDiscordReport(report);
+                    if (!isBenchmarkSetRun)
+                    {
+                        SendDiscordReport(report);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -426,7 +565,299 @@ namespace Oxide.Plugins
                 _reportRunning = false;
                 _activeCoroutine = null;
                 _activeLabel = null;
+
+                if (isBenchmarkSetRun && _activeBenchmarkSet == benchmarkSet)
+                {
+                    timer.Once(_config.BenchmarkSetCooldownSeconds, delegate
+                    {
+                        ContinueBenchmarkSet(benchmarkSet);
+                    });
+                }
             }
+        }
+
+        private PerformanceReport BuildBenchmarkSetReport(BenchmarkSetExecution set)
+        {
+            PerformanceReport first = set.Reports[0];
+            PerformanceReport last = set.Reports[set.Reports.Count - 1];
+            PerformanceReport aggregate = new PerformanceReport
+            {
+                SchemaVersion = 5,
+                ReportId = Guid.NewGuid().ToString("N"),
+                Label = set.Label,
+                Mode = "benchmark-set",
+                ServerIdentity = ConVar.Server.identity,
+                StartedUtc = set.StartedUtc,
+                CompletedUtc = DateTime.UtcNow,
+                ObservationStartedUtc = first.ObservationStartedUtc,
+                ObservationCompletedUtc = last.ObservationCompletedUtc,
+                WarmupDurationSeconds = set.Reports.Count * set.WarmupSeconds,
+                OnlinePlayers = first.OnlinePlayers,
+                SleepingPlayers = first.SleepingPlayers,
+                CompletedOnlinePlayers = last.CompletedOnlinePlayers,
+                CompletedSleepingPlayers = last.CompletedSleepingPlayers,
+                PerformanceSnapshot = last.PerformanceSnapshot,
+                Entities = last.Entities,
+                BenchmarkSet = new BenchmarkSetSummary
+                {
+                    RequestedRuns = set.RequestedRuns,
+                    CompletedRuns = set.Reports.Count,
+                    DurationSecondsPerRun = set.DurationSeconds,
+                    WarmupSecondsPerRun = set.WarmupSeconds,
+                    Members = new List<BenchmarkSetMember>()
+                }
+            };
+
+            aggregate.TotalReportDurationSeconds = Math.Max(0, (aggregate.CompletedUtc - aggregate.StartedUtc).TotalSeconds);
+            aggregate.PerformanceWindow = BuildAggregatePerformanceWindow(set.Reports);
+            aggregate.WorkloadWindow = BuildAggregateWorkloadWindow(set.Reports);
+            aggregate.ObservationDurationSeconds = aggregate.PerformanceWindow == null
+                ? 0
+                : aggregate.PerformanceWindow.DurationSeconds;
+            aggregate.Plugins = BuildAggregatePluginReport(set.Reports, aggregate.ObservationDurationSeconds);
+
+            QualityReport quality = new QualityReport
+            {
+                SuitableForComparison = true,
+                Warnings = new List<string>(),
+                ContextNotes = new List<string>(),
+                EnvironmentEvents = new List<EnvironmentEvent>()
+            };
+
+            for (int i = 0; i < set.Reports.Count; i++)
+            {
+                PerformanceReport report = set.Reports[i];
+                aggregate.BenchmarkSet.Members.Add(BenchmarkSetMember.FromReport(report));
+                if (report.Quality == null)
+                {
+                    quality.SuitableForComparison = false;
+                    quality.Warnings.Add("Run " + (i + 1) + " has no quality assessment.");
+                    continue;
+                }
+
+                if (!report.Quality.SuitableForComparison)
+                {
+                    quality.SuitableForComparison = false;
+                }
+
+                AddPrefixedMessages(quality.Warnings, report.Quality.Warnings, "Run " + (i + 1) + ": ");
+                AddPrefixedMessages(quality.ContextNotes, report.Quality.ContextNotes, "Run " + (i + 1) + ": ");
+                if (report.Quality.EnvironmentEvents != null)
+                {
+                    quality.EnvironmentEvents.AddRange(report.Quality.EnvironmentEvents);
+                }
+            }
+
+            aggregate.Quality = quality;
+            return aggregate;
+        }
+
+        private static void AddPrefixedMessages(List<string> destination, List<string> source, string prefix)
+        {
+            if (source == null)
+            {
+                return;
+            }
+
+            for (int i = 0; i < source.Count; i++)
+            {
+                destination.Add(prefix + source[i]);
+            }
+        }
+
+        private static PerformanceWindowReport BuildAggregatePerformanceWindow(List<PerformanceReport> reports)
+        {
+            if (reports == null || reports.Count == 0)
+            {
+                return null;
+            }
+
+            List<MetricSummary> metrics = new List<MetricSummary>();
+            for (int i = 0; i < PerformanceMetrics.Length; i++)
+            {
+                MetricDefinition definition = PerformanceMetrics[i];
+                List<double> runAverages = new List<double>();
+                for (int runIndex = 0; runIndex < reports.Count; runIndex++)
+                {
+                    MetricSummary metric = FindMetric(reports[runIndex].PerformanceWindow, definition.Name);
+                    if (metric != null)
+                    {
+                        runAverages.Add(metric.Average);
+                    }
+                }
+
+                MetricSummary summary = CreateSetMetricSummary(definition.Name, definition.MemberName, definition.Unit, runAverages);
+                if (summary != null)
+                {
+                    metrics.Add(summary);
+                }
+            }
+
+            int samples = 0;
+            double duration = 0;
+            for (int i = 0; i < reports.Count; i++)
+            {
+                if (reports[i].PerformanceWindow != null)
+                {
+                    samples += reports[i].PerformanceWindow.SampleCount;
+                    duration += reports[i].PerformanceWindow.DurationSeconds;
+                }
+            }
+
+            return new PerformanceWindowReport
+            {
+                StartedUtc = reports[0].ObservationStartedUtc,
+                CompletedUtc = reports[reports.Count - 1].ObservationCompletedUtc,
+                DurationSeconds = duration,
+                SampleCount = samples,
+                Metrics = metrics
+            };
+        }
+
+        private static WorkloadWindowReport BuildAggregateWorkloadWindow(List<PerformanceReport> reports)
+        {
+            List<double> players = new List<double>();
+            List<double> entities = new List<double>();
+            for (int i = 0; i < reports.Count; i++)
+            {
+                WorkloadWindowReport workload = reports[i].WorkloadWindow;
+                if (workload != null)
+                {
+                    if (workload.OnlinePlayers != null)
+                    {
+                        players.Add(workload.OnlinePlayers.Average);
+                    }
+
+                    if (workload.NetworkedEntities != null)
+                    {
+                        entities.Add(workload.NetworkedEntities.Average);
+                    }
+                }
+            }
+
+            return new WorkloadWindowReport
+            {
+                OnlinePlayers = CreateSetMetricSummary("Online Players", "onlinePlayers", "players", players),
+                NetworkedEntities = CreateSetMetricSummary("Networked Entities", "networkedEntities", "entities", entities)
+            };
+        }
+
+        private static PluginReport BuildAggregatePluginReport(List<PerformanceReport> reports, double totalDurationSeconds)
+        {
+            Dictionary<string, PluginSetAccumulator> pluginsByName =
+                new Dictionary<string, PluginSetAccumulator>(StringComparer.OrdinalIgnoreCase);
+            List<double> totalRates = new List<double>();
+
+            for (int runIndex = 0; runIndex < reports.Count; runIndex++)
+            {
+                PluginReport pluginReport = reports[runIndex].Plugins;
+                if (pluginReport == null || pluginReport.Entries == null || pluginReport.ObservationDurationSeconds <= 0)
+                {
+                    continue;
+                }
+
+                totalRates.Add(pluginReport.ObservedHookTimeTotalSeconds * 60000d / pluginReport.ObservationDurationSeconds);
+                for (int i = 0; i < pluginReport.Entries.Count; i++)
+                {
+                    PluginReportEntry entry = pluginReport.Entries[i];
+                    if (!entry.HookTimeMillisecondsPerMinute.HasValue)
+                    {
+                        continue;
+                    }
+
+                    PluginSetAccumulator accumulator;
+                    if (!pluginsByName.TryGetValue(entry.Name, out accumulator))
+                    {
+                        accumulator = new PluginSetAccumulator
+                        {
+                            Name = entry.Name,
+                            Version = entry.Version,
+                            Rates = new List<double>()
+                        };
+                        pluginsByName.Add(entry.Name, accumulator);
+                    }
+
+                    accumulator.Rates.Add(entry.HookTimeMillisecondsPerMinute.Value);
+                }
+            }
+
+            double medianTotalRate = GetMedian(totalRates);
+            PluginReport aggregate = new PluginReport
+            {
+                CapturedUtc = DateTime.UtcNow,
+                BaselineAvailable = true,
+                ObservationDurationSeconds = totalDurationSeconds,
+                ObservedHookTimeTotalSeconds = medianTotalRate * totalDurationSeconds / 60000d,
+                Entries = new List<PluginReportEntry>()
+            };
+
+            double summedMedianRates = 0;
+            foreach (PluginSetAccumulator accumulator in pluginsByName.Values)
+            {
+                double medianRate = GetMedian(accumulator.Rates);
+                summedMedianRates += medianRate;
+                aggregate.Entries.Add(new PluginReportEntry
+                {
+                    Name = accumulator.Name,
+                    Version = accumulator.Version,
+                    ObservedHookTimeSeconds = medianRate * totalDurationSeconds / 60000d,
+                    HookTimeMillisecondsPerMinute = medianRate,
+                    MemoryMetricKind = "Not aggregated"
+                });
+            }
+
+            for (int i = 0; i < aggregate.Entries.Count; i++)
+            {
+                PluginReportEntry entry = aggregate.Entries[i];
+                entry.ObservedHookTimeSharePercent = summedMedianRates <= 0
+                    ? (double?)null
+                    : entry.HookTimeMillisecondsPerMinute.Value * 100d / summedMedianRates;
+            }
+
+            aggregate.Entries.Sort(delegate(PluginReportEntry left, PluginReportEntry right)
+            {
+                return (right.HookTimeMillisecondsPerMinute ?? 0).CompareTo(left.HookTimeMillisecondsPerMinute ?? 0);
+            });
+            for (int i = 0; i < aggregate.Entries.Count; i++)
+            {
+                aggregate.Entries[i].ImpactRank = i + 1;
+            }
+
+            return aggregate;
+        }
+
+        private static MetricSummary CreateSetMetricSummary(string name, string sourceMember, string unit, List<double> values)
+        {
+            if (values == null || values.Count == 0)
+            {
+                return null;
+            }
+
+            MetricAccumulator accumulator = new MetricAccumulator(new MetricDefinition(name, sourceMember, unit));
+            for (int i = 0; i < values.Count; i++)
+            {
+                accumulator.Add(values[i]);
+            }
+
+            MetricSummary summary = accumulator.CreateSummary();
+            summary.Average = summary.Median;
+            summary.Last = values[values.Count - 1];
+            return summary;
+        }
+
+        private static double GetMedian(List<double> values)
+        {
+            if (values == null || values.Count == 0)
+            {
+                return 0;
+            }
+
+            List<double> sorted = new List<double>(values);
+            sorted.Sort();
+            int middle = sorted.Count / 2;
+            return sorted.Count % 2 == 0
+                ? (sorted[middle - 1] + sorted[middle]) / 2d
+                : sorted[middle];
         }
 
         #endregion
@@ -728,6 +1159,30 @@ namespace Oxide.Plugins
                     report.OnlinePlayers, report.CompletedOnlinePlayers));
             }
 
+            if (report.WorkloadWindow != null && report.WorkloadWindow.OnlinePlayers != null
+                && report.WorkloadWindow.OnlinePlayers.Maximum - report.WorkloadWindow.OnlinePlayers.Minimum >= 1d)
+            {
+                quality.Warnings.Add(string.Format(CultureInfo.InvariantCulture,
+                    "Sampled online players ranged from {0:F0} to {1:F0} during the observation.",
+                    report.WorkloadWindow.OnlinePlayers.Minimum, report.WorkloadWindow.OnlinePlayers.Maximum));
+            }
+
+            if (report.WorkloadWindow != null && report.WorkloadWindow.NetworkedEntities != null
+                && report.WorkloadWindow.NetworkedEntities.Minimum > 0)
+            {
+                double entityRangePercent = (report.WorkloadWindow.NetworkedEntities.Maximum
+                                             - report.WorkloadWindow.NetworkedEntities.Minimum)
+                                            * 100d / report.WorkloadWindow.NetworkedEntities.Minimum;
+                if (entityRangePercent >= 5d)
+                {
+                    quality.ContextNotes.Add(string.Format(CultureInfo.InvariantCulture,
+                        "Sampled networked entities varied by {0:F1}% ({1:F0}–{2:F0}).",
+                        entityRangePercent,
+                        report.WorkloadWindow.NetworkedEntities.Minimum,
+                        report.WorkloadWindow.NetworkedEntities.Maximum));
+                }
+            }
+
             int minimumSamples = report.Mode == "benchmark"
                 ? _config.MinimumBenchmarkSamplesForComparison
                 : 3;
@@ -865,20 +1320,24 @@ namespace Oxide.Plugins
                 pluginSignalReliable,
                 pluginNoiseNote);
 
-            if (baseline.OnlinePlayers != current.OnlinePlayers)
+            double baselinePlayers = baseline.AverageOnlinePlayers ?? baseline.OnlinePlayers;
+            double currentPlayers = current.AverageOnlinePlayers ?? current.OnlinePlayers;
+            if (Math.Abs(baselinePlayers - currentPlayers) >= 1d)
             {
                 comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
-                    "Online players differ: baseline {0}, current {1}.", baseline.OnlinePlayers, current.OnlinePlayers));
+                    "Average online players differ: baseline {0:F1}, current {1:F1}.", baselinePlayers, currentPlayers));
             }
 
-            if (baseline.EntityCount > 0 && current.EntityCount > 0)
+            double baselineEntities = baseline.AverageNetworkedEntities ?? baseline.EntityCount;
+            double currentEntities = current.AverageNetworkedEntities ?? current.EntityCount;
+            if (baselineEntities > 0 && currentEntities > 0)
             {
-                double entityDifferencePercent = (current.EntityCount - baseline.EntityCount) * 100d / baseline.EntityCount;
+                double entityDifferencePercent = (currentEntities - baselineEntities) * 100d / baselineEntities;
                 if (Math.Abs(entityDifferencePercent) >= 5d)
                 {
                     comparison.ContextWarnings.Add(string.Format(CultureInfo.InvariantCulture,
-                        "Entity count differs by {0:+0.0;-0.0;0.0}%: baseline {1}, current {2}.",
-                        entityDifferencePercent, baseline.EntityCount, current.EntityCount));
+                        "Average networked entities differ by {0:+0.0;-0.0;0.0}%: baseline {1:F0}, current {2:F0}.",
+                        entityDifferencePercent, baselineEntities, currentEntities));
                 }
             }
 
@@ -1119,7 +1578,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            if (discord.OnlySendBenchmarks && report.Mode != "benchmark")
+            if (discord.OnlySendBenchmarks && report.Mode != "benchmark" && report.Mode != "benchmark-set")
             {
                 return;
             }
@@ -1160,14 +1619,18 @@ namespace Oxide.Plugins
         private DiscordPayload BuildDiscordPayload(PerformanceReport report, DiscordConfiguration discord)
         {
             List<DiscordField> fields = new List<DiscordField>();
+            bool isBenchmarkSet = report.Mode == "benchmark-set";
             string context = string.Format(CultureInfo.InvariantCulture,
-                "**Mode:** {0}\n**Observation:** {1:F1}s\n**Players:** {2} → {3}\n**Entities:** {4:N0}\n**Samples:** {5}",
+                "**Mode:** {0}\n**Observation:** {1:F1}s\n**Players:** {2}\n**Entities:** {3}\n**Samples:** {4}{5}",
                 EscapeDiscordMarkdown(report.Mode),
                 report.ObservationDurationSeconds,
-                report.OnlinePlayers,
-                report.CompletedOnlinePlayers,
-                report.Entities == null ? 0 : report.Entities.Total,
-                report.PerformanceWindow == null ? 0 : report.PerformanceWindow.SampleCount);
+                FormatWorkloadMetric(report.WorkloadWindow == null ? null : report.WorkloadWindow.OnlinePlayers,
+                    report.OnlinePlayers, report.CompletedOnlinePlayers),
+                FormatWorkloadMetric(report.WorkloadWindow == null ? null : report.WorkloadWindow.NetworkedEntities,
+                    report.Entities == null ? 0 : report.Entities.Total,
+                    report.Entities == null ? 0 : report.Entities.Total),
+                report.PerformanceWindow == null ? 0 : report.PerformanceWindow.SampleCount,
+                report.BenchmarkSet == null ? string.Empty : "\n**Runs:** " + report.BenchmarkSet.CompletedRuns);
             fields.Add(new DiscordField("Context", context, true));
 
             MetricSummary averageFrameTime = FindMetric(report.PerformanceWindow, "Average Frame Time")
@@ -1183,6 +1646,24 @@ namespace Oxide.Plugins
                 FormatMetric(frameRate, false));
             fields.Add(new DiscordField("Performance", performance, true));
 
+            if (report.Plugins != null && report.Plugins.ObservationDurationSeconds > 0)
+            {
+                double pluginMillisecondsPerSecond = report.Plugins.ObservedHookTimeTotalSeconds * 1000d
+                                                     / report.Plugins.ObservationDurationSeconds;
+                string pluginLoad = string.Format(CultureInfo.InvariantCulture,
+                    "**Total hook load:** {0:F2} ms/sec\n**One-thread budget:** {1:F3}%\n**Normalized:** {2:F2} ms/min",
+                    pluginMillisecondsPerSecond,
+                    pluginMillisecondsPerSecond / 10d,
+                    pluginMillisecondsPerSecond * 60d);
+                fields.Add(new DiscordField("Absolute plugin cost", pluginLoad, true));
+            }
+
+            if (report.BenchmarkSet != null && report.BenchmarkSet.Members != null)
+            {
+                fields.Add(new DiscordField("Benchmark-set stability",
+                    BuildBenchmarkSetDiscordSummary(report.BenchmarkSet), false));
+            }
+
             if (report.Plugins != null && report.Plugins.Entries != null)
             {
                 int pluginCount = Math.Min(discord.TopPluginCount, report.Plugins.Entries.Count);
@@ -1195,13 +1676,25 @@ namespace Oxide.Plugins
                         pluginText.Append('\n');
                     }
 
-                    pluginText.AppendFormat(CultureInfo.InvariantCulture,
-                        "`#{0}` **{1}** — {2:F2} ms ({3:F1}%) · {4:F2} ms/min",
-                        entry.ImpactRank,
-                        EscapeDiscordMarkdown(entry.Name),
-                        (entry.ObservedHookTimeSeconds ?? 0) * 1000d,
-                        entry.ObservedHookTimeSharePercent ?? 0,
-                        entry.HookTimeMillisecondsPerMinute ?? 0);
+                    if (isBenchmarkSet)
+                    {
+                        pluginText.AppendFormat(CultureInfo.InvariantCulture,
+                            "`#{0}` **{1}** — median {2:F2} ms/min ({3:F1}%)",
+                            entry.ImpactRank,
+                            EscapeDiscordMarkdown(entry.Name),
+                            entry.HookTimeMillisecondsPerMinute ?? 0,
+                            entry.ObservedHookTimeSharePercent ?? 0);
+                    }
+                    else
+                    {
+                        pluginText.AppendFormat(CultureInfo.InvariantCulture,
+                            "`#{0}` **{1}** — {2:F2} ms ({3:F1}%) · {4:F2} ms/min",
+                            entry.ImpactRank,
+                            EscapeDiscordMarkdown(entry.Name),
+                            (entry.ObservedHookTimeSeconds ?? 0) * 1000d,
+                            entry.ObservedHookTimeSharePercent ?? 0,
+                            entry.HookTimeMillisecondsPerMinute ?? 0);
+                    }
                 }
 
                 if (pluginText.Length > 0)
@@ -1284,11 +1777,15 @@ namespace Oxide.Plugins
 
             DiscordEmbed embed = new DiscordEmbed
             {
-                Title = (report.Mode == "benchmark" ? "Performance benchmark: " : "Performance report: ")
+                Title = (isBenchmarkSet
+                            ? "Performance benchmark set: "
+                            : report.Mode == "benchmark" ? "Performance benchmark: " : "Performance report: ")
                         + Truncate(EscapeDiscordMarkdown(report.Label), 200),
-                Description = report.Mode == "benchmark"
-                    ? "A controlled performance observation window completed. Full raw data remains on the server."
-                    : "A rolling server performance report completed. Full raw data remains on the server.",
+                Description = isBenchmarkSet
+                    ? "A repeated benchmark set completed. Central values are medians across runs; full member reports remain on the server."
+                    : report.Mode == "benchmark"
+                        ? "A controlled performance observation window completed. Full raw data remains on the server."
+                        : "A rolling server performance report completed. Full raw data remains on the server.",
                 Color = HasComparisonWarnings(report) ? 16753920 : 3066993,
                 Timestamp = report.CompletedUtc.ToString("o", CultureInfo.InvariantCulture),
                 Fields = fields,
@@ -1336,6 +1833,70 @@ namespace Oxide.Plugins
 
             double value = useLast ? metric.Last : metric.Average;
             return value.ToString("F2", CultureInfo.InvariantCulture) + " " + metric.Unit;
+        }
+
+        private static string FormatWorkloadMetric(MetricSummary metric, int startValue, int endValue)
+        {
+            if (metric == null || metric.Samples == 0)
+            {
+                return startValue == endValue
+                    ? startValue.ToString("N0", CultureInfo.InvariantCulture)
+                    : string.Format(CultureInfo.InvariantCulture, "{0:N0} → {1:N0}", startValue, endValue);
+            }
+
+            return string.Format(CultureInfo.InvariantCulture, "{0:F1} avg ({1:F0}–{2:F0})",
+                metric.Average, metric.Minimum, metric.Maximum);
+        }
+
+        private static string BuildBenchmarkSetDiscordSummary(BenchmarkSetSummary set)
+        {
+            List<double> frameTimes = new List<double>();
+            List<double> pluginRates = new List<double>();
+            List<double> players = new List<double>();
+            List<double> entities = new List<double>();
+            for (int i = 0; i < set.Members.Count; i++)
+            {
+                AddNullable(frameTimes, set.Members[i].AverageFrameTime);
+                AddNullable(pluginRates, set.Members[i].PluginHookMillisecondsPerMinute);
+                AddNullable(players, set.Members[i].AverageOnlinePlayers);
+                AddNullable(entities, set.Members[i].AverageNetworkedEntities);
+            }
+
+            return string.Format(CultureInfo.InvariantCulture,
+                "**Runs:** {0}/{1}\n**Frame time:** {2}\n**Plugin hook load:** {3}\n**Players:** {4}\n**Entities:** {5}",
+                set.CompletedRuns, set.RequestedRuns,
+                FormatMedianRange(frameTimes, "ms"),
+                FormatMedianRange(pluginRates, "ms/min"),
+                FormatMedianRange(players, string.Empty),
+                FormatMedianRange(entities, string.Empty));
+        }
+
+        private static void AddNullable(List<double> destination, double? value)
+        {
+            if (value.HasValue)
+            {
+                destination.Add(value.Value);
+            }
+        }
+
+        private static string FormatMedianRange(List<double> values, string unit)
+        {
+            if (values == null || values.Count == 0)
+            {
+                return "n/a";
+            }
+
+            double minimum = double.MaxValue;
+            double maximum = double.MinValue;
+            for (int i = 0; i < values.Count; i++)
+            {
+                minimum = Math.Min(minimum, values[i]);
+                maximum = Math.Max(maximum, values[i]);
+            }
+
+            string suffix = string.IsNullOrEmpty(unit) ? string.Empty : " " + unit;
+            return string.Format(CultureInfo.InvariantCulture, "{0:F2}{1} (range {2:F2}–{3:F2})",
+                GetMedian(values), suffix, minimum, maximum);
         }
 
         private static string NormalizeDiscordId(string value)
@@ -1522,6 +2083,9 @@ namespace Oxide.Plugins
             _config.DefaultBenchmarkDurationSeconds = Math.Min(_config.DefaultBenchmarkDurationSeconds, _config.MaximumBenchmarkDurationSeconds);
             _config.DefaultBenchmarkWarmupSeconds = Math.Max(0, _config.DefaultBenchmarkWarmupSeconds);
             _config.MaximumBenchmarkWarmupSeconds = Math.Max(_config.DefaultBenchmarkWarmupSeconds, _config.MaximumBenchmarkWarmupSeconds);
+            _config.DefaultBenchmarkSetRuns = Math.Max(2, Math.Min(10, _config.DefaultBenchmarkSetRuns));
+            _config.MaximumBenchmarkSetRuns = Math.Max(_config.DefaultBenchmarkSetRuns, Math.Min(20, _config.MaximumBenchmarkSetRuns));
+            _config.BenchmarkSetCooldownSeconds = Mathf.Clamp(_config.BenchmarkSetCooldownSeconds, 0f, 300f);
             _config.MinimumBenchmarkSamplesForComparison = Math.Max(10, Math.Min(1000, _config.MinimumBenchmarkSamplesForComparison));
             _config.MinimumPluginHookMillisecondsForComparison = Math.Max(0, _config.MinimumPluginHookMillisecondsForComparison);
             _config.MaximumNamedBenchmarkReferences = Math.Max(10, Math.Min(1000, _config.MaximumNamedBenchmarkReferences));
@@ -1587,6 +2151,15 @@ namespace Oxide.Plugins
 
             [JsonProperty("Maximum benchmark warm-up seconds")]
             public int MaximumBenchmarkWarmupSeconds = 300;
+
+            [JsonProperty("Default benchmark set runs")]
+            public int DefaultBenchmarkSetRuns = 3;
+
+            [JsonProperty("Maximum benchmark set runs")]
+            public int MaximumBenchmarkSetRuns = 10;
+
+            [JsonProperty("Benchmark set cooldown seconds")]
+            public float BenchmarkSetCooldownSeconds = 5f;
 
             [JsonProperty("Compare each benchmark with the previous benchmark")]
             public bool CompareBenchmarkToPrevious = true;
@@ -1705,6 +2278,9 @@ namespace Oxide.Plugins
             [JsonProperty("Performance Window")]
             public PerformanceWindowReport PerformanceWindow;
 
+            [JsonProperty("Workload Window", NullValueHandling = NullValueHandling.Ignore)]
+            public WorkloadWindowReport WorkloadWindow;
+
             [JsonProperty("Performance Snapshot")]
             public Performance.Tick PerformanceSnapshot;
 
@@ -1719,6 +2295,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Previous Benchmark Comparison", NullValueHandling = NullValueHandling.Ignore)]
             public BenchmarkComparison PreviousBenchmarkComparison;
+
+            [JsonProperty("Benchmark Set", NullValueHandling = NullValueHandling.Ignore)]
+            public BenchmarkSetSummary BenchmarkSet;
 
             [JsonProperty("Error", NullValueHandling = NullValueHandling.Ignore)]
             public string Error;
@@ -1896,6 +2475,70 @@ namespace Oxide.Plugins
             public double Last;
         }
 
+        private class WorkloadWindowReport
+        {
+            [JsonProperty("Online Players")]
+            public MetricSummary OnlinePlayers;
+
+            [JsonProperty("Networked Entities")]
+            public MetricSummary NetworkedEntities;
+        }
+
+        private class BenchmarkSetSummary
+        {
+            [JsonProperty("Requested Runs")]
+            public int RequestedRuns;
+
+            [JsonProperty("Completed Runs")]
+            public int CompletedRuns;
+
+            [JsonProperty("Observation Duration Seconds Per Run")]
+            public int DurationSecondsPerRun;
+
+            [JsonProperty("Warm-up Seconds Per Run")]
+            public int WarmupSecondsPerRun;
+
+            [JsonProperty("Members")]
+            public List<BenchmarkSetMember> Members;
+        }
+
+        private class BenchmarkSetMember
+        {
+            public string ReportId;
+            public string Label;
+            public double? AverageFrameTime;
+            public double? AverageFrameRate;
+            public double? PluginHookMillisecondsPerMinute;
+            public double? AverageOnlinePlayers;
+            public double? AverageNetworkedEntities;
+            public bool SuitableForComparison;
+
+            public static BenchmarkSetMember FromReport(PerformanceReport report)
+            {
+                MetricSummary frameTime = FindMetric(report.PerformanceWindow, "Average Frame Time")
+                                          ?? FindMetric(report.PerformanceWindow, "Frame Time");
+                MetricSummary frameRate = FindMetric(report.PerformanceWindow, "Average Frame Rate")
+                                          ?? FindMetric(report.PerformanceWindow, "Frame Rate");
+                return new BenchmarkSetMember
+                {
+                    ReportId = report.ReportId,
+                    Label = report.Label,
+                    AverageFrameTime = frameTime == null ? null : (double?)frameTime.Average,
+                    AverageFrameRate = frameRate == null ? null : (double?)frameRate.Average,
+                    PluginHookMillisecondsPerMinute = report.Plugins == null || report.Plugins.ObservationDurationSeconds <= 0
+                        ? null
+                        : (double?)(report.Plugins.ObservedHookTimeTotalSeconds * 60000d / report.Plugins.ObservationDurationSeconds),
+                    AverageOnlinePlayers = report.WorkloadWindow == null || report.WorkloadWindow.OnlinePlayers == null
+                        ? (double?)report.CompletedOnlinePlayers
+                        : report.WorkloadWindow.OnlinePlayers.Average,
+                    AverageNetworkedEntities = report.WorkloadWindow == null || report.WorkloadWindow.NetworkedEntities == null
+                        ? (double?)null
+                        : report.WorkloadWindow.NetworkedEntities.Average,
+                    SuitableForComparison = report.Quality != null && report.Quality.SuitableForComparison
+                };
+            }
+        }
+
         private class QualityReport
         {
             [JsonProperty("Suitable For Comparison")]
@@ -1993,6 +2636,8 @@ namespace Oxide.Plugins
             public int? SampleCount;
             public int OnlinePlayers;
             public int EntityCount;
+            public double? AverageOnlinePlayers;
+            public double? AverageNetworkedEntities;
             public bool SuitableForComparison;
             public bool HasContextNotes;
 
@@ -2020,6 +2665,12 @@ namespace Oxide.Plugins
                     SampleCount = report.PerformanceWindow == null ? null : (int?)report.PerformanceWindow.SampleCount,
                     OnlinePlayers = report.CompletedOnlinePlayers,
                     EntityCount = report.Entities == null ? 0 : report.Entities.Total,
+                    AverageOnlinePlayers = report.WorkloadWindow == null || report.WorkloadWindow.OnlinePlayers == null
+                        ? (double?)null
+                        : report.WorkloadWindow.OnlinePlayers.Average,
+                    AverageNetworkedEntities = report.WorkloadWindow == null || report.WorkloadWindow.NetworkedEntities == null
+                        ? (double?)null
+                        : report.WorkloadWindow.NetworkedEntities.Average,
                     SuitableForComparison = report.Quality != null && report.Quality.SuitableForComparison,
                     HasContextNotes = report.Quality != null && report.Quality.ContextNotes != null
                                       && report.Quality.ContextNotes.Count > 0
@@ -2098,6 +2749,59 @@ namespace Oxide.Plugins
         {
             [JsonProperty("text")]
             public string Text;
+        }
+
+        private class BenchmarkSetExecution
+        {
+            public string Label;
+            public int RequestedRuns;
+            public int DurationSeconds;
+            public int WarmupSeconds;
+            public string BaselineLabel;
+            public DateTime StartedUtc;
+            public List<PerformanceReport> Reports;
+        }
+
+        private class PluginSetAccumulator
+        {
+            public string Name;
+            public string Version;
+            public List<double> Rates;
+        }
+
+        private class WorkloadAccumulator
+        {
+            private readonly DateTime _startedUtc;
+            private DateTime _completedUtc;
+            private readonly MetricAccumulator _players = new MetricAccumulator(
+                new MetricDefinition("Online Players", "onlinePlayers", "players"));
+            private readonly MetricAccumulator _entities = new MetricAccumulator(
+                new MetricDefinition("Networked Entities", "networkedEntities", "entities"));
+
+            public WorkloadAccumulator(DateTime startedUtc)
+            {
+                _startedUtc = startedUtc;
+            }
+
+            public void Capture(int onlinePlayers, int networkedEntities)
+            {
+                _players.Add(onlinePlayers);
+                _entities.Add(networkedEntities);
+            }
+
+            public void Close(DateTime completedUtc)
+            {
+                _completedUtc = completedUtc;
+            }
+
+            public WorkloadWindowReport CreateReport()
+            {
+                return new WorkloadWindowReport
+                {
+                    OnlinePlayers = _players.CreateSummary(),
+                    NetworkedEntities = _entities.CreateSummary()
+                };
+            }
         }
 
         private class MetricDefinition

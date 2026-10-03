@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.5.0
+
+- Added `monitor.benchmarkset` for repeated benchmark runs with a single median/range aggregate report.
+- Added sampled player and networked-entity workload windows and workload-aware comparisons.
+- Added absolute plugin-hook load (`ms/sec`, `ms/min`, and approximate one-thread percentage) to Discord.
+- Added benchmark-set stability and median plugin-impact summaries while retaining every member report as raw JSON.
+- Corrected benchmark plugin-rate normalization so warm-up time is excluded from the observation denominator.
+
 ## 2.4.0
 
 - Classified routine server saves and sampled garbage collections as contextual quality markers instead of hard comparison failures.
