@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.6.0")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.6.1")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -1628,8 +1628,7 @@ namespace Oxide.Plugins
             bool isBenchmarkSet = report.Mode == "benchmark-set";
             string serverDescription = ResolveDiscordServerDescription(discord);
             string context = string.Format(CultureInfo.InvariantCulture,
-                "**Server:** {0}\n**Mode:** {1}\n**Observation:** {2:F1}s\n**Players:** {3}\n**Entities:** {4}\n**Samples:** {5}{6}",
-                serverDescription,
+                "**Mode:** {0}\n**Observation:** {1:F1}s\n**Players:** {2}\n**Entities:** {3}\n**Samples:** {4}{5}",
                 EscapeDiscordMarkdown(report.Mode),
                 report.ObservationDurationSeconds,
                 FormatWorkloadMetric(report.WorkloadWindow == null ? null : report.WorkloadWindow.OnlinePlayers,
@@ -1785,6 +1784,10 @@ namespace Oxide.Plugins
 
             DiscordEmbed embed = new DiscordEmbed
             {
+                Author = new DiscordAuthor
+                {
+                    Name = Truncate("SERVER • " + serverDescription, 256)
+                },
                 Title = (isBenchmarkSet
                             ? "Performance benchmark set: "
                             : report.Mode == "benchmark" ? "Performance benchmark: " : "Performance report: ")
@@ -1837,7 +1840,7 @@ namespace Oxide.Plugins
             }
 
             description = description.Trim().Replace('\r', ' ').Replace('\n', ' ');
-            return EscapeDiscordMarkdown(Truncate(description, 200));
+            return Truncate(description, 200);
         }
 
         private static bool HasComparisonWarnings(PerformanceReport report)
@@ -2743,6 +2746,9 @@ namespace Oxide.Plugins
 
         private class DiscordEmbed
         {
+            [JsonProperty("author")]
+            public DiscordAuthor Author;
+
             [JsonProperty("title")]
             public string Title;
 
@@ -2760,6 +2766,12 @@ namespace Oxide.Plugins
 
             [JsonProperty("footer")]
             public DiscordFooter Footer;
+        }
+
+        private class DiscordAuthor
+        {
+            [JsonProperty("name")]
+            public string Name;
         }
 
         private class DiscordField

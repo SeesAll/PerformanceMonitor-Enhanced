@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.6.1
+
+- Promoted the source server to a dedicated Discord header above the report title.
+- Removed the duplicate server line from the compact Context column to improve readability.
+
 ## 2.6.0
 
 - Added a Discord server-description setting so reports clearly identify their source server.
