@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.3.1")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.4.0")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -260,7 +260,7 @@ namespace Oxide.Plugins
             DateTime startedUtc = DateTime.UtcNow;
             PerformanceReport report = new PerformanceReport
             {
-                SchemaVersion = 3,
+                SchemaVersion = 4,
                 ReportId = Guid.NewGuid().ToString("N"),
                 Label = label,
                 Mode = benchmark ? "benchmark" : "snapshot",
@@ -717,6 +717,7 @@ namespace Oxide.Plugins
             {
                 SuitableForComparison = true,
                 Warnings = new List<string>(),
+                ContextNotes = new List<string>(),
                 EnvironmentEvents = new List<EnvironmentEvent>()
             };
 
@@ -751,14 +752,22 @@ namespace Oxide.Plugins
                 if (environmentEvent.TimestampUtc >= windowStart && environmentEvent.TimestampUtc <= windowEnd)
                 {
                     quality.EnvironmentEvents.Add(environmentEvent);
-                    quality.Warnings.Add(environmentEvent.Type + ": " + environmentEvent.Description);
+                    string eventMessage = environmentEvent.Type + ": " + environmentEvent.Description;
+                    if (string.Equals(environmentEvent.Type, "ServerSave", StringComparison.OrdinalIgnoreCase))
+                    {
+                        quality.ContextNotes.Add(eventMessage);
+                    }
+                    else
+                    {
+                        quality.Warnings.Add(eventMessage);
+                    }
                 }
             }
 
             MetricSummary gcMetric = FindMetric(report.PerformanceWindow, "GC Triggered");
             if (gcMetric != null && gcMetric.Maximum > 0)
             {
-                quality.Warnings.Add("At least one sampled performance tick reported a garbage collection.");
+                quality.ContextNotes.Add("At least one sampled performance tick reported a garbage collection.");
             }
 
             quality.SuitableForComparison = quality.Warnings.Count == 0;
@@ -906,11 +915,12 @@ namespace Oxide.Plugins
                     baseline.SampleCount.Value, currentSampleCount, _config.MinimumBenchmarkSamplesForComparison));
             }
 
+            bool hasContextNotes = baseline.HasContextNotes || current.HasContextNotes;
             if (comparison.ContextWarnings.Count > 0)
             {
                 comparison.Confidence = "Low";
             }
-            else if (!pluginSignalReliable)
+            else if (!pluginSignalReliable || hasContextNotes)
             {
                 comparison.Confidence = "Moderate";
             }
@@ -1254,9 +1264,21 @@ namespace Oxide.Plugins
 
             if (report.Quality != null)
             {
-                string qualityText = report.Quality.SuitableForComparison
-                    ? "✅ Current observation passed all configured quality checks."
-                    : "⚠️ " + Truncate(string.Join("\n⚠️ ", report.Quality.Warnings.ToArray()), 1000);
+                List<string> qualityNotes = report.Quality.ContextNotes ?? new List<string>();
+                string qualityText;
+                if (!report.Quality.SuitableForComparison)
+                {
+                    qualityText = "⚠️ " + Truncate(string.Join("\n⚠️ ", report.Quality.Warnings.ToArray()), 1000);
+                }
+                else if (qualityNotes.Count > 0)
+                {
+                    qualityText = "✅ Suitable for comparison.\nℹ️ "
+                                  + Truncate(string.Join("\nℹ️ ", qualityNotes.ToArray()), 950);
+                }
+                else
+                {
+                    qualityText = "✅ Current observation passed all configured quality checks.";
+                }
                 fields.Add(new DiscordField("Current measurement quality", qualityText, false));
             }
 
@@ -1294,6 +1316,8 @@ namespace Oxide.Plugins
         private static bool HasComparisonWarnings(PerformanceReport report)
         {
             return (report.Quality != null && !report.Quality.SuitableForComparison)
+                   || (report.Quality != null && report.Quality.ContextNotes != null
+                       && report.Quality.ContextNotes.Count > 0)
                    || (report.PreviousBenchmarkComparison != null
                        && !string.Equals(report.PreviousBenchmarkComparison.Confidence, "High", StringComparison.OrdinalIgnoreCase));
         }
@@ -1880,6 +1904,9 @@ namespace Oxide.Plugins
             [JsonProperty("Warnings")]
             public List<string> Warnings;
 
+            [JsonProperty("Context Notes")]
+            public List<string> ContextNotes;
+
             [JsonProperty("Environment Events")]
             public List<EnvironmentEvent> EnvironmentEvents;
         }
@@ -1967,6 +1994,7 @@ namespace Oxide.Plugins
             public int OnlinePlayers;
             public int EntityCount;
             public bool SuitableForComparison;
+            public bool HasContextNotes;
 
             public static BenchmarkReference FromReport(PerformanceReport report)
             {
@@ -1992,7 +2020,9 @@ namespace Oxide.Plugins
                     SampleCount = report.PerformanceWindow == null ? null : (int?)report.PerformanceWindow.SampleCount,
                     OnlinePlayers = report.CompletedOnlinePlayers,
                     EntityCount = report.Entities == null ? 0 : report.Entities.Total,
-                    SuitableForComparison = report.Quality != null && report.Quality.SuitableForComparison
+                    SuitableForComparison = report.Quality != null && report.Quality.SuitableForComparison,
+                    HasContextNotes = report.Quality != null && report.Quality.ContextNotes != null
+                                      && report.Quality.ContextNotes.Count > 0
                 };
             }
         }

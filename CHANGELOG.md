@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.0
+
+- Classified routine server saves and sampled garbage collections as contextual quality markers instead of hard comparison failures.
+- Added context notes to schema 4 reports and Discord measurement-quality output.
+- Downgraded otherwise valid benchmark comparisons with contextual markers to Moderate confidence.
+
 ## 2.3.1
 
 - Clarified that missing sample counts from pre-schema-3 baselines are unavailable rather than literal zero-sample observations.
