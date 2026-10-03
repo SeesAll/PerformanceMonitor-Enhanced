@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.5.1
+
+- Made benchmark sets without an explicit baseline establish a new aggregate baseline instead of auto-comparing with an incompatible preceding single run.
+- Marked plugin-rate comparisons against pre-schema-5 references inconclusive because those reports used the old warm-up-inclusive denominator.
+
 ## 2.5.0
 
 - Added `monitor.benchmarkset` for repeated benchmark runs with a single median/range aggregate report.

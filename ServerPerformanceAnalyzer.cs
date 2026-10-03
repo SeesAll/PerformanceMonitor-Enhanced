@@ -14,7 +14,7 @@ using UnityEngine;
 
 namespace Oxide.Plugins
 {
-    [Info("Server Performance Analyzer", "SeesAll", "2.5.0")]
+    [Info("Server Performance Analyzer", "SeesAll", "2.5.1")]
     [Description("Low-impact server performance reports and repeatable plugin benchmark windows")]
     public class ServerPerformanceAnalyzer : RustPlugin
     {
@@ -331,7 +331,9 @@ namespace Oxide.Plugins
             try
             {
                 PerformanceReport aggregate = BuildBenchmarkSetReport(set);
-                bool createComparison = _config.CompareBenchmarkToPrevious || set.BaselineLabel != null;
+                // A set without an explicit baseline establishes a new aggregate baseline. Automatically
+                // comparing it with the preceding single run mixes two different statistical units.
+                bool createComparison = set.BaselineLabel != null;
                 aggregate.PreviousBenchmarkComparison = BuildAndStoreBenchmarkComparison(
                     aggregate, set.BaselineLabel, createComparison);
                 SaveReport(aggregate);
@@ -1305,11 +1307,15 @@ namespace Oxide.Plugins
             AddComparisonMetric(comparison, "Average Frame Time", baseline.AverageFrameTime, current.AverageFrameTime, true, "ms", true, null);
             AddComparisonMetric(comparison, "Average Frame Rate", baseline.AverageFrameRate, current.AverageFrameRate, false, "fps", true, null);
 
-            bool pluginSignalReliable = baseline.PluginHookObservedMilliseconds >= _config.MinimumPluginHookMillisecondsForComparison
+            bool pluginRateSchemaCompatible = baseline.SchemaVersion >= 5;
+            bool pluginSignalReliable = pluginRateSchemaCompatible
+                                        && baseline.PluginHookObservedMilliseconds >= _config.MinimumPluginHookMillisecondsForComparison
                                         && current.PluginHookObservedMilliseconds >= _config.MinimumPluginHookMillisecondsForComparison;
-            string pluginNoiseNote = pluginSignalReliable
-                ? null
-                : string.Format(CultureInfo.InvariantCulture,
+            string pluginNoiseNote = !pluginRateSchemaCompatible
+                ? "Baseline predates schema 5 and used the old warm-up-inclusive plugin-rate denominator."
+                : pluginSignalReliable
+                    ? null
+                    : string.Format(CultureInfo.InvariantCulture,
                     "One or both windows measured less than {0:F1} ms of total plugin hook time.",
                     _config.MinimumPluginHookMillisecondsForComparison);
             AddComparisonMetric(comparison, "Plugin Hook Time Rate",
@@ -2625,6 +2631,7 @@ namespace Oxide.Plugins
 
         private class BenchmarkReference
         {
+            public int SchemaVersion;
             public string ReportId;
             public string Label;
             public DateTime CompletedUtc;
@@ -2650,6 +2657,7 @@ namespace Oxide.Plugins
 
                 return new BenchmarkReference
                 {
+                    SchemaVersion = report.SchemaVersion,
                     ReportId = report.ReportId,
                     Label = report.Label,
                     CompletedUtc = report.CompletedUtc,
